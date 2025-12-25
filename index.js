@@ -258,6 +258,7 @@ function calculate_truncation_index() {
     // itemizedPrompts contains all generations, we need to find the ones for the last message
     const lastMessageId = chat.length - 1;
     let promptChatTokens = 0;
+    let itemizedCount = 0;
     
     // Find itemizedPrompts for the last message
     for (let i = itemizedPrompts.length - 1; i >= 0; i--) {
@@ -271,11 +272,14 @@ function calculate_truncation_index() {
                 tokenCount = count_tokens(rawPrompt ?? '');
             }
             promptChatTokens += tokenCount;
+            itemizedCount++;
         } else if (itemizedPrompt?.mesId < lastMessageId) {
             // We've gone past the last message, stop
             break;
         }
     }
+    
+    debug(`  Found ${itemizedCount} itemizedPrompts for message ${lastMessageId}`);
     
     // If we didn't find any itemizedPrompts, fall back to counting all messages
     if (promptChatTokens === 0) {
