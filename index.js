@@ -187,6 +187,7 @@ function save_truncation_index() {
         chat_metadata[MODULE_NAME] = {};
     }
     chat_metadata[MODULE_NAME].truncation_index = TRUNCATION_INDEX;
+    chat_metadata[MODULE_NAME].target_size = get_settings('target_context_size');
     debug(`Saved truncation index: ${TRUNCATION_INDEX}`);
     saveMetadataDebounced();
 }
@@ -195,6 +196,19 @@ function reset_truncation_index() {
     debug('Resetting truncation index');
     TRUNCATION_INDEX = null;
     save_truncation_index();
+}
+
+function should_recalculate_truncation() {
+    // Recalculate if target size changed
+    const savedTargetSize = chat_metadata?.[MODULE_NAME]?.target_size;
+    const currentTargetSize = get_settings('target_context_size');
+    
+    if (savedTargetSize !== undefined && savedTargetSize !== currentTargetSize) {
+        debug(`Target size changed from ${savedTargetSize} to ${currentTargetSize}, forcing recalculation`);
+        return true;
+    }
+    
+    return false;
 }
 
 // Calculate truncation index based on target context size
@@ -275,6 +289,12 @@ function update_message_inclusion_flags() {
     // Load truncation index
     if (TRUNCATION_INDEX === null) {
         load_truncation_index();
+    }
+    
+    // Force recalculation if target size changed
+    if (should_recalculate_truncation()) {
+        debug('Forcing recalculation due to settings change');
+        TRUNCATION_INDEX = null;
     }
     
     // Calculate new truncation index if needed
