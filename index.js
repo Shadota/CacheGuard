@@ -221,25 +221,10 @@ function estimate_size_after_truncation(chat, truncateUpTo) {
 }
 
 function apply_truncation(chat, truncateUpTo) {
-    const IGNORE_SYMBOL = getContext().symbols.ignore;
+    debug(`Applying truncation: removing first ${truncateUpTo} messages from chat array`);
     
-    debug(`Applying truncation up to index ${truncateUpTo}`);
-    
-    for (let i = 0; i < truncateUpTo && i < chat.length; i++) {
-        if (!chat[i].is_system) {
-            // Clone to avoid permanent modification
-            chat[i] = structuredClone(chat[i]);
-            chat[i].extra[IGNORE_SYMBOL] = true;
-            
-            // Store metadata
-            if (!chat[i].extra[MODULE_NAME]) {
-                chat[i].extra[MODULE_NAME] = {};
-            }
-            chat[i].extra[MODULE_NAME].truncated = true;
-        }
-    }
-    
-    return chat;
+    // Simply return a slice of the chat array, excluding the first truncateUpTo messages
+    return chat.slice(truncateUpTo);
 }
 
 function perform_batch_truncation(chat, currentContextSize) {
