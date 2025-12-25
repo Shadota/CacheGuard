@@ -119,6 +119,9 @@ function get_previous_prompt_size() {
     return size;
 }
 
+// Calculate the ratio between our token counts and ST's actual prompt size
+let MESSAGE_TOKEN_RATIO = 1.0;
+
 // Calculate system overhead by comparing full prompt with message tokens
 function calculate_system_overhead(chat, currentTruncationIndex) {
     const previousPromptSize = get_previous_prompt_size();
@@ -127,19 +130,34 @@ function calculate_system_overhead(chat, currentTruncationIndex) {
         return SYSTEM_OVERHEAD; // Use default if no previous prompt
     }
     
-    // Count messages that were KEPT in the previous generation
-    // (i.e., from currentTruncationIndex to end)
+    // Count ALL messages (raw count)
+    let allMessageTokens = 0;
+    for (let i = 0; i < chat.length; i++) {
+        if (!chat[i].is_system) {
+            allMessageTokens += count_tokens(chat[i].mes);
+        }
+    }
+    
+    // Calculate the ratio: actual prompt / our raw count
+    // This accounts for ST's formatting overhead per message
+    if (allMessageTokens > 0) {
+        MESSAGE_TOKEN_RATIO = previousPromptSize / allMessageTokens;
+        debug(`Message token ratio: ${MESSAGE_TOKEN_RATIO.toFixed(3)} (${previousPromptSize} actual / ${allMessageTokens} raw)`);
+    }
+    
+    // Now count messages from truncation index with the ratio applied
     let keptMessageTokens = 0;
     for (let i = currentTruncationIndex; i < chat.length; i++) {
         if (!chat[i].is_system) {
             keptMessageTokens += count_tokens(chat[i].mes);
         }
     }
+    keptMessageTokens *= MESSAGE_TOKEN_RATIO;
     
     // System overhead = total prompt - kept message tokens
     const overhead = previousPromptSize - keptMessageTokens;
     
-    debug(`Calculated system overhead: ${overhead} tokens (${previousPromptSize} total - ${keptMessageTokens} kept messages from index ${currentTruncationIndex})`);
+    debug(`Calculated system overhead: ${overhead.toFixed(0)} tokens (${previousPromptSize} total - ${keptMessageTokens.toFixed(0)} kept messages from index ${currentTruncationIndex})`);
     
     return Math.max(overhead, 500); // Minimum 500 tokens
 }
@@ -170,6 +188,9 @@ function estimate_size_after_truncation(chat, truncateUpTo) {
         }
     }
     
+    // Apply the ratio to account for ST's formatting overhead
+    total *= MESSAGE_TOKEN_RATIO;
+    
     // Add dynamically calculated system overhead
     total += SYSTEM_OVERHEAD;
     
@@ -198,7 +219,7 @@ function apply_truncation(chat, truncateUpTo) {
     return chat;
 }
 
-function perform_batch_truncation(chat) {
+function perform_batch_truncation(chat, currentContextSize) {
     const batchSize = get_settings('batch_size');
     const minKeep = get_settings('min_messages_to_keep');
     const targetSize = get_settings('target_context_size');
@@ -208,6 +229,10 @@ function perform_batch_truncation(chat) {
         TRUNCATION_INDEX = 0;
     }
     
+    // Use the actual context size if provided, otherwise calculate
+    let currentSize = currentContextSize || get_previous_prompt_size();
+    debug(`Current context size: ${currentSize} tokens`);
+    
     // Calculate system overhead dynamically based on current truncation
     SYSTEM_OVERHEAD = calculate_system_overhead(chat, TRUNCATION_INDEX);
     
@@ -215,8 +240,6 @@ function perform_batch_truncation(chat) {
     const maxTruncateUpTo = Math.max(chatLength - minKeep, 0);
     
     debug(`Starting batch truncation. Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
-    
-    let currentSize = get_previous_prompt_size();
     
     // Check if we can move the truncation index backward (un-truncate)
     // This happens when target size increases or messages are added
@@ -273,7 +296,7 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     // This allows both forward (truncate more) and backward (un-truncate) movement
     if (TRUNCATION_INDEX !== null || should_truncate()) {
         debug('Running batch truncation logic');
-        return perform_batch_truncation(chat);
+        return perform_batch_truncation(chat, contextSize);
     }
     
     return chat;
