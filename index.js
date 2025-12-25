@@ -191,18 +191,20 @@ function perform_batch_truncation(chat) {
     // Check if we can move the truncation index backward (un-truncate)
     // This happens when target size increases or messages are added
     if (TRUNCATION_INDEX > 0) {
-        let testSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
-        
         // Try moving backward in batches while we're still under target
-        while (TRUNCATION_INDEX > 0 && testSize < targetSize) {
+        while (TRUNCATION_INDEX > 0) {
             const newIndex = Math.max(TRUNCATION_INDEX - batchSize, 0);
-            testSize = estimate_size_after_truncation(chat, newIndex);
+            const testSize = estimate_size_after_truncation(chat, newIndex);
             
+            debug(`Testing un-truncation: index ${TRUNCATION_INDEX} -> ${newIndex}, estimated size: ${testSize}`);
+            
+            // Only move backward if the new position stays under target
             if (testSize <= targetSize) {
                 debug(`Un-truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
                 TRUNCATION_INDEX = newIndex;
             } else {
                 // Would exceed target, stop here
+                debug(`Would exceed target (${testSize} > ${targetSize}), stopping at index ${TRUNCATION_INDEX}`);
                 break;
             }
         }
