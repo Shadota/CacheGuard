@@ -237,16 +237,11 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     
     debug(`Intercepting messages. Type: ${type}, Context: ${contextSize}`);
     
-    // Check if we need to truncate based on previous prompt
-    if (should_truncate()) {
-        debug('Truncation needed, performing batch truncation');
+    // Always run batch truncation logic if we have an existing index OR need to truncate
+    // This allows both forward (truncate more) and backward (un-truncate) movement
+    if (TRUNCATION_INDEX !== null || should_truncate()) {
+        debug('Running batch truncation logic');
         return perform_batch_truncation(chat);
-    }
-    
-    // Apply existing truncation if any
-    if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
-        debug(`Applying existing truncation index: ${TRUNCATION_INDEX}`);
-        return apply_truncation(chat, TRUNCATION_INDEX);
     }
     
     return chat;
