@@ -222,13 +222,21 @@ function estimate_size_after_truncation(chat, truncateUpTo) {
 
 function apply_truncation(chat, truncateUpTo) {
     const originalLength = chat.length;
-    debug(`Applying truncation: removing first ${truncateUpTo} messages from chat array (in-place). Original length: ${originalLength}`);
+    debug(`Applying truncation: marking first ${truncateUpTo} messages for exclusion. Total messages: ${originalLength}`);
     
-    // Remove messages from the array IN PLACE using splice
-    chat.splice(0, truncateUpTo);
+    // Get the IGNORE_SYMBOL from SillyTavern's context
+    const ctx = getContext();
+    const IGNORE_SYMBOL = ctx.symbols.ignore;
     
-    const newLength = chat.length;
-    debug(`Truncation complete. New length: ${newLength} (removed ${originalLength - newLength} messages)`);
+    // Mark messages for exclusion using ST's ignore symbol
+    // Clone each message to avoid modifying the permanent chat
+    for (let i = 0; i < chat.length; i++) {
+        chat[i] = structuredClone(chat[i]);  // Keep changes temporary for this generation
+        chat[i].extra[IGNORE_SYMBOL] = i < truncateUpTo;  // Ignore if before truncation index
+    }
+    
+    const keptCount = originalLength - truncateUpTo;
+    debug(`Truncation complete. Marked ${truncateUpTo} messages to ignore, keeping ${keptCount} messages`);
     
     return chat;
 }
@@ -327,10 +335,9 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     // This is necessary because we need to re-apply truncation markers each generation
     debug('Running batch truncation logic');
     
-    // Modify the chat array and also update ctx.chat to ensure ST uses our changes
+    // Apply truncation using ST's ignore symbol
+    // The chat array is modified in-place with ignore markers
     const truncatedChat = perform_batch_truncation(chat, contextSize);
-    const ctx = getContext();
-    ctx.chat = truncatedChat;
     
     return truncatedChat;
 };
