@@ -127,10 +127,12 @@ function calculate_system_overhead(chat) {
         return SYSTEM_OVERHEAD; // Use default if no previous prompt
     }
     
-    // Count all message tokens
+    const IGNORE_SYMBOL = getContext().symbols.ignore;
+    
+    // Count only messages that are NOT ignored (i.e., actually in the prompt)
     let messageTokens = 0;
     for (let i = 0; i < chat.length; i++) {
-        if (!chat[i].is_system) {
+        if (!chat[i].is_system && !chat[i].extra?.[IGNORE_SYMBOL]) {
             messageTokens += count_tokens(chat[i].mes);
         }
     }
@@ -160,10 +162,12 @@ function should_truncate() {
 }
 
 function estimate_size_after_truncation(chat, truncateUpTo) {
+    const IGNORE_SYMBOL = getContext().symbols.ignore;
     let total = 0;
     
+    // Count messages from truncateUpTo onwards that are NOT ignored
     for (let i = truncateUpTo; i < chat.length; i++) {
-        if (!chat[i].is_system) {
+        if (!chat[i].is_system && !chat[i].extra?.[IGNORE_SYMBOL]) {
             total += count_tokens(chat[i].mes);
         }
     }
