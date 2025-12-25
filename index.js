@@ -229,55 +229,60 @@ function perform_batch_truncation(chat, currentContextSize) {
         TRUNCATION_INDEX = 0;
     }
     
-    // Use the actual context size if provided, otherwise calculate
-    let currentSize = currentContextSize || get_previous_prompt_size();
-    debug(`Current context size: ${currentSize} tokens`);
-    
-    // Calculate system overhead dynamically based on current truncation
-    SYSTEM_OVERHEAD = calculate_system_overhead(chat, TRUNCATION_INDEX);
-    
     const chatLength = chat.length;
     const maxTruncateUpTo = Math.max(chatLength - minKeep, 0);
     
-    debug(`Starting batch truncation. Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
+    // Use ST's calculated context size as our baseline
+    let currentSize = currentContextSize || get_previous_prompt_size();
+    debug(`Starting batch truncation. Current size: ${currentSize}, Target: ${targetSize}, Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
     
-    // Check if we can move the truncation index backward (un-truncate)
-    // This happens when target size increases or messages are added
-    if (TRUNCATION_INDEX > 0) {
-        // Try moving backward in batches while we're still under target
-        while (TRUNCATION_INDEX > 0) {
-            const newIndex = Math.max(TRUNCATION_INDEX - batchSize, 0);
-            const testSize = estimate_size_after_truncation(chat, newIndex);
-            
-            debug(`Testing un-truncation: index ${TRUNCATION_INDEX} -> ${newIndex}, estimated size: ${testSize}`);
-            
-            // Only move backward if the new position stays under target
-            if (testSize <= targetSize) {
-                debug(`Un-truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
-                TRUNCATION_INDEX = newIndex;
-            } else {
-                // Would exceed target, stop here
-                debug(`Would exceed target (${testSize} > ${targetSize}), stopping at index ${TRUNCATION_INDEX}`);
-                break;
-            }
+    // Calculate how many tokens we need to remove
+    const tokensToRemove = currentSize - targetSize;
+    
+    if (tokensToRemove <= 0 && TRUNCATION_INDEX === 0) {
+        debug(`Already under target, no truncation needed`);
+        return chat;
+    }
+    
+    // Count all message tokens to calculate average tokens per message
+    let totalMessageTokens = 0;
+    let messageCount = 0;
+    for (let i = 0; i < chat.length; i++) {
+        if (!chat[i].is_system) {
+            totalMessageTokens += count_tokens(chat[i].mes);
+            messageCount++;
         }
     }
     
-    // Now check if we need to move forward (truncate more)
-    currentSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
+    const avgTokensPerMessage = messageCount > 0 ? totalMessageTokens / messageCount : 0;
+    debug(`Average tokens per message: ${avgTokensPerMessage.toFixed(0)} (${totalMessageTokens} total / ${messageCount} messages)`);
     
-    while (currentSize > targetSize && TRUNCATION_INDEX < maxTruncateUpTo) {
-        // Advance truncation index by batch size
-        const newIndex = Math.min(TRUNCATION_INDEX + batchSize, maxTruncateUpTo);
+    // Estimate how many messages to truncate based on tokens to remove
+    const messagesToTruncate = Math.ceil(tokensToRemove / avgTokensPerMessage);
+    debug(`Need to remove ${tokensToRemove} tokens, estimated ${messagesToTruncate} messages`);
+    
+    // If we need to truncate more
+    if (tokensToRemove > 0) {
+        // Move forward in batches
+        const targetIndex = Math.min(
+            TRUNCATION_INDEX + Math.max(messagesToTruncate, batchSize),
+            maxTruncateUpTo
+        );
         
-        debug(`Truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
+        debug(`Moving truncation index from ${TRUNCATION_INDEX} to ${targetIndex}`);
+        TRUNCATION_INDEX = targetIndex;
+    }
+    // If we're over-truncated and can un-truncate
+    else if (tokensToRemove < 0 && TRUNCATION_INDEX > 0) {
+        // We have room to un-truncate
+        const messagesToRestore = Math.floor(Math.abs(tokensToRemove) / avgTokensPerMessage);
+        const targetIndex = Math.max(
+            TRUNCATION_INDEX - Math.max(messagesToRestore, batchSize),
+            0
+        );
         
-        TRUNCATION_INDEX = newIndex;
-        
-        // Recalculate size after this batch
-        currentSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
-        
-        debug(`Estimated size after truncation: ${currentSize} tokens`);
+        debug(`Moving truncation index backward from ${TRUNCATION_INDEX} to ${targetIndex}`);
+        TRUNCATION_INDEX = targetIndex;
     }
     
     // Apply truncation to chat
