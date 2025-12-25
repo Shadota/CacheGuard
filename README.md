@@ -6,6 +6,8 @@ Batch-based context truncation to prevent cache invalidation when using LLMs wit
 
 When using LLMs with caching (like Claude), removing messages one-by-one invalidates the cache on every generation, causing slower responses and higher costs. This extension removes messages in fixed batches, minimizing cache invalidation while keeping context under control.
 
+**Note:** The target context size is approximate and may vary by ±10% due to batch-based truncation. This is intentional to preserve cache efficiency.
+
 ## How It Works
 
 1. **Monitors** the previous prompt size using SillyTavern's raw context API
@@ -26,7 +28,7 @@ When using LLMs with caching (like Claude), removing messages one-by-one invalid
 ### Settings
 
 - **Enable Batch Truncation**: Toggle the extension on/off
-- **Target Context Size**: The size (in tokens) to trim down to (default: 8000)
+- **Target Context Size (±10%)**: The approximate size (in tokens) to trim down to (default: 8000). Actual size may vary by ±10% due to batch truncation.
 - **Batch Size**: Number of messages to remove per batch (default: 20)
 - **Min Messages to Keep**: Safety limit - never go below this many messages (default: 10)
 - **Debug Mode**: Enable detailed logging to browser console
@@ -34,8 +36,8 @@ When using LLMs with caching (like Claude), removing messages one-by-one invalid
 ### Status Display
 
 The status panel shows real-time information:
-- **Current Context**: Size of the previous prompt in tokens
-- **Target**: Your configured target size
+- **Current Context**: Size of the previous prompt in tokens (color-coded: 🔴 Red if >110% of target, 🟡 Yellow if within ±10%, 🟢 Green if <90%)
+- **Target**: Your configured target size (±10% variance expected)
 - **Batch Size**: Current batch size setting
 - **Truncation Index**: Where truncation starts (first message to keep)
 - **Total Messages**: Total messages in chat
@@ -49,24 +51,27 @@ The status panel shows real-time information:
 ## Example Scenario
 
 **Setup:**
-- Target context: 8000 tokens
+- Target context: 8000 tokens (±10% = 7200-8800 acceptable range)
 - Batch size: 20 messages
 - Min keep: 10 messages
 - Chat has 100 messages
 
 **Execution:**
-1. **Generation 1**: Context = 7500 tokens → No truncation
-2. **Generation 2**: Context = 8500 tokens → Remove messages 0-19 (batch 1)
-3. **Generation 3**: Context = 8200 tokens → Remove messages 20-39 (batch 2)
-4. **Generation 4**: Context = 7800 tokens → No more truncation needed
-5. **Generation 5+**: Context stays under 8000 → **Cache preserved!**
+1. **Generation 1**: Context = 7500 tokens → No truncation (within range)
+2. **Generation 2**: Context = 8900 tokens → Remove messages 0-19 (batch 1)
+3. **Generation 3**: Context = 8200 tokens → No more truncation (within range)
+4. **Generation 4**: Context = 7800 tokens → No truncation (within range)
+5. **Generation 5+**: Context stays within 7200-8800 → **Cache preserved!**
+
+**Note:** The actual context size will typically vary within ±10% of your target due to batch-based truncation. This is expected behavior and ensures cache efficiency.
 
 ## Benefits
 
 - **Cache Efficiency**: 20x fewer cache invalidations (removing 20 at once vs 1 at a time)
 - **Predictable Behavior**: Always removes fixed batches, not variable amounts
+- **Approximate Targeting**: Maintains context within ±10% of target for optimal cache preservation
 - **Safety**: Minimum message setting prevents over-truncation
-- **Transparency**: Status display shows exactly what's happening
+- **Transparency**: Color-coded status display shows exactly what's happening
 - **Automatic**: Works seamlessly in the background
 
 ## Requirements

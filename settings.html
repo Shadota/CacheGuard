@@ -15,10 +15,10 @@
             </label>
             
             <!-- Settings -->
-            <label class="checkbox_label" title="Target context size to trim down to (in tokens)">
-                <input id="ct_target_size" class="text_pole widthUnset inline_setting" 
+            <label class="checkbox_label" title="Target context size to trim down to (in tokens). Actual size may vary by ±10% due to batch truncation.">
+                <input id="ct_target_size" class="text_pole widthUnset inline_setting"
                        type="number" min="1000" max="200000" step="1000" />
-                <span>Target Context Size (tokens)</span>
+                <span>Target Context Size (tokens) <small>(±10%)</small></span>
             </label>
             
             <label class="checkbox_label" title="Number of messages to remove per batch (prevents cache invalidation)">
@@ -41,11 +41,11 @@
                 <table class="ct_status_table">
                     <tr>
                         <td>Current Context:</td>
-                        <td><strong id="ct_current_size">-</strong> tokens</td>
+                        <td><strong id="ct_current_size">-</strong> tokens <small>(🔴 >110% | 🟡 ±10% | 🟢 <90%)</small></td>
                     </tr>
                     <tr>
                         <td>Target:</td>
-                        <td><strong id="ct_target_display">-</strong> tokens</td>
+                        <td><strong id="ct_target_display">-</strong> tokens <small>(±10%)</small></td>
                     </tr>
                     <tr>
                         <td>Batch Size:</td>

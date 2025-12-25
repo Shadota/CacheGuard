@@ -109,8 +109,12 @@ function get_previous_prompt_size() {
     let raw_prompt = get_last_prompt_raw();
     
     if (!raw_prompt) {
-        debug('No previous prompt found');
-        return 0;
+        debug('No previous prompt found, assuming max context size');
+        // Safeguard: If no previous prompt, assume max size to trigger truncation
+        const ctx = getContext();
+        const maxSize = getMaxContextSize();
+        debug(`Using max context size: ${maxSize} tokens`);
+        return maxSize;
     }
     
     const size = count_tokens(raw_prompt);
@@ -264,11 +268,19 @@ function update_status_display() {
     $('#ct_total_messages').text(chat.length);
     $('#ct_kept_messages').text(TRUNCATION_INDEX !== null ? chat.length - TRUNCATION_INDEX : chat.length);
     
-    // Color coding
-    if (currentSize > targetSize) {
-        $('#ct_current_size').css('color', 'var(--SmartThemeEmColor)');
+    // Color coding: Red if >110% of target, Yellow if within ±10%, Green if <90%
+    const lowerBound = targetSize * 0.9;   // 90% of target
+    const upperBound = targetSize * 1.1;   // 110% of target
+    
+    if (currentSize > upperBound) {
+        // Over 110% of target - RED
+        $('#ct_current_size').css('color', '#ff4444');
+    } else if (currentSize < lowerBound) {
+        // Under 90% of target - GREEN
+        $('#ct_current_size').css('color', '#44ff44');
     } else {
-        $('#ct_current_size').css('color', 'var(--SmartThemeQuoteColor)');
+        // Within ±10% of target - YELLOW
+        $('#ct_current_size').css('color', 'var(--SmartThemeEmColor)');
     }
 }
 
