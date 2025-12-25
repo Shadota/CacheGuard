@@ -232,8 +232,8 @@ function perform_batch_truncation(chat, currentContextSize) {
     const chatLength = chat.length;
     const maxTruncateUpTo = Math.max(chatLength - minKeep, 0);
     
-    // Use ST's calculated context size as our baseline
-    let currentSize = currentContextSize || get_previous_prompt_size();
+    // Use the previous prompt size as our baseline (contextSize is unreliable due to other extensions)
+    let currentSize = get_previous_prompt_size();
     debug(`Starting batch truncation. Current size: ${currentSize}, Target: ${targetSize}, Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
     
     // Calculate how many tokens we need to remove
