@@ -254,20 +254,37 @@ function calculate_truncation_index() {
         assistant: count_tokens(PROMPT_HEADER_ASSISTANT),
     };
     
-    // Get chat tokens from itemizedPrompts
+    // Get chat tokens from itemizedPrompts (only from the LAST generation)
+    // itemizedPrompts contains all generations, we need to find the ones for the last message
+    const lastMessageId = chat.length - 1;
     let promptChatTokens = 0;
-    for (let i = 0; i < itemizedPrompts.length; i++) {
+    
+    // Find itemizedPrompts for the last message
+    for (let i = itemizedPrompts.length - 1; i >= 0; i--) {
         let itemizedPrompt = itemizedPrompts[i];
-        if (itemizedPrompt?.mesId === undefined || itemizedPrompt?.mesId === null) {
-            continue;
+        if (itemizedPrompt?.mesId === lastMessageId) {
+            // Found an itemized prompt for the last message
+            let tokenCount = itemizedPrompt?.tokenCount;
+            if (tokenCount === undefined) {
+                let rawPrompt = itemizedPrompt?.rawPrompt;
+                if (Array.isArray(rawPrompt)) rawPrompt = rawPrompt.map(x => x.content).join('\n');
+                tokenCount = count_tokens(rawPrompt ?? '');
+            }
+            promptChatTokens += tokenCount;
+        } else if (itemizedPrompt?.mesId < lastMessageId) {
+            // We've gone past the last message, stop
+            break;
         }
-        let tokenCount = itemizedPrompt?.tokenCount;
-        if (tokenCount === undefined) {
-            let rawPrompt = itemizedPrompt?.rawPrompt;
-            if (Array.isArray(rawPrompt)) rawPrompt = rawPrompt.map(x => x.content).join('\n');
-            tokenCount = count_tokens(rawPrompt ?? '');
+    }
+    
+    // If we didn't find any itemizedPrompts, fall back to counting all messages
+    if (promptChatTokens === 0) {
+        debug('  No itemizedPrompts found for last message, counting all messages');
+        for (let i = 0; i < chat.length; i++) {
+            if (!chat[i].is_system) {
+                promptChatTokens += count_tokens(chat[i].mes);
+            }
         }
-        promptChatTokens += tokenCount;
     }
     
     // Calculate non-chat budget (system prompts, character card, etc.)
