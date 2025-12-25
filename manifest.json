@@ -1,6 +1,6 @@
 {
     "display_name": "Context Truncator",
-    "loading_order": 9999,
+    "loading_order": 0,
     "requires": [],
     "optional": [],
     "minimum_client_version": "1.14.0",
