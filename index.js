@@ -143,29 +143,19 @@ function estimate_size_after_truncation(chat, truncateUpTo) {
 }
 
 function apply_truncation(chat, truncateUpTo) {
-    const IGNORE_SYMBOL = getContext().symbols.ignore;
+    debug(`Applying truncation: removing messages 0-${truncateUpTo-1}, keeping ${truncateUpTo}-${chat.length-1}`);
     
-    debug(`Applying truncation up to index ${truncateUpTo}`);
-    
-    // Modify chat array in-place (like MessageSummarize does)
-    for (let i = 0; i < chat.length; i++) {
-        if (chat[i].is_system) continue;  // Skip system messages
-        
-        // Delete ignore_formatting to ensure clean state
-        delete chat[i].extra?.ignore_formatting;
-        
-        // Clone to avoid permanent modification
-        chat[i] = structuredClone(chat[i]);
-        
-        // Set IGNORE_SYMBOL based on whether this message should be truncated
-        chat[i].extra[IGNORE_SYMBOL] = i < truncateUpTo;
-        
-        // Store metadata
-        if (!chat[i].extra[MODULE_NAME]) {
-            chat[i].extra[MODULE_NAME] = {};
-        }
-        chat[i].extra[MODULE_NAME].truncated = i < truncateUpTo;
+    // DIFFERENT APPROACH: Actually remove the messages from the array
+    // Store them so we can restore them later if needed
+    if (!chat._truncated_messages) {
+        chat._truncated_messages = [];
     }
+    
+    // Remove messages from the start of the array
+    const removed = chat.splice(0, truncateUpTo);
+    chat._truncated_messages = removed;
+    
+    debug(`Removed ${removed.length} messages. Chat now has ${chat.length} messages.`);
     
     return chat;
 }
