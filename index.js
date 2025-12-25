@@ -221,10 +221,14 @@ function estimate_size_after_truncation(chat, truncateUpTo) {
 }
 
 function apply_truncation(chat, truncateUpTo) {
-    debug(`Applying truncation: removing first ${truncateUpTo} messages from chat array (in-place)`);
+    const originalLength = chat.length;
+    debug(`Applying truncation: removing first ${truncateUpTo} messages from chat array (in-place). Original length: ${originalLength}`);
     
     // Remove messages from the array IN PLACE using splice
     chat.splice(0, truncateUpTo);
+    
+    const newLength = chat.length;
+    debug(`Truncation complete. New length: ${newLength} (removed ${originalLength - newLength} messages)`);
     
     return chat;
 }
