@@ -522,9 +522,7 @@ let CURRENT_CONTEXT_SIZE = 0;
 
 // Message interception hook (called by SillyTavern before generation)
 globalThis.truncator_intercept_messages = function (chat, contextSize, abort, type) {
-    if (!get_settings('enabled')) {
-        return chat;
-    }
+    if (!get_settings('enabled')) return;
     
     // Store context size for calculation
     CURRENT_CONTEXT_SIZE = contextSize;
@@ -539,23 +537,20 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     if (type === 'continue') start--;
     
     // Get IGNORE_SYMBOL
-    const ctx = getContext();
-    const IGNORE_SYMBOL = ctx.symbols.ignore;
+    let IGNORE_SYMBOL = getContext().symbols.ignore;
     
     // Mark messages with IGNORE_SYMBOL based on lagging flag
     for (let i = start; i >= 0; i--) {
-        delete chat[i].extra?.ignore_formatting;
+        delete chat[i].extra.ignore_formatting;
         
-        const message = chat[i];
-        const lagging = get_data(message, 'lagging');
+        let message = chat[i];
+        let lagging = get_data(message, 'lagging');
         
         chat[i] = structuredClone(chat[i]);
         chat[i].extra[IGNORE_SYMBOL] = !lagging;  // TRUE = keep, FALSE = ignore
     }
     
     debug(`Applied IGNORE_SYMBOL based on lagging flags`);
-    
-    return chat;
 };
 
 // Summarization functionality
