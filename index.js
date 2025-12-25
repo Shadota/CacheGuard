@@ -308,11 +308,18 @@ function calculate_truncation_index() {
         let total = 0;
         for (let i = 0; i < chat.length; i++) {
             const message = chat[i];
+            
+            // Skip system messages
+            if (message.is_system) continue;
+            
+            // Messages at or after startIndex are kept in full
             const kept = i >= startIndex;
             if (kept) {
                 total += estimateMessagePromptTokens(message, i);
                 continue;
             }
+            
+            // Messages before startIndex are replaced with summaries (if they have one)
             const summary = get_memory(message);
             if (summary && check_message_exclusion(message)) {
                 total += count_tokens(summary) + sepSize;
