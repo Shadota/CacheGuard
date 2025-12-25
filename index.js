@@ -212,6 +212,7 @@ function should_recalculate_truncation() {
 }
 
 // Calculate truncation index based on target context size
+// Based on MessageSummarize's get_injection_threshold() token-based calculation
 function calculate_truncation_index() {
     const ctx = getContext();
     const chat = ctx.chat;
@@ -237,40 +238,138 @@ function calculate_truncation_index() {
         return 0;
     }
     
-    // Calculate how many tokens to remove
-    const tokensToRemove = currentPromptSize - targetSize;
-    debug(`  Need to remove ${tokensToRemove} tokens`);
+    // Get the current truncation index (or start at 0)
+    let currentIndex = TRUNCATION_INDEX || 0;
+    let maxIndex = Math.max(chat.length - minKeep, 0);
+    let nextIndex = Math.min(currentIndex, maxIndex);
     
-    // Calculate average tokens per message from ALL messages
-    let totalTokens = 0;
-    let messageCount = 0;
-    for (let i = 0; i < chat.length; i++) {
-        if (!chat[i].is_system) {
-            totalTokens += count_tokens(chat[i].mes);
-            messageCount++;
+    // Calculate separator size for summaries
+    const sepSize = calculate_injection_separator_size();
+    
+    // Prompt header tokens (for estimating message sizes in prompt)
+    const PROMPT_HEADER_USER = '<|eot_id|><|start_header_id|>user<|end_header_id|>';
+    const PROMPT_HEADER_ASSISTANT = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>';
+    const promptHeaderTokens = {
+        user: count_tokens(PROMPT_HEADER_USER),
+        assistant: count_tokens(PROMPT_HEADER_ASSISTANT),
+    };
+    
+    // Get chat tokens from itemizedPrompts
+    let promptChatTokens = 0;
+    for (let i = 0; i < itemizedPrompts.length; i++) {
+        let itemizedPrompt = itemizedPrompts[i];
+        if (itemizedPrompt?.mesId === undefined || itemizedPrompt?.mesId === null) {
+            continue;
+        }
+        let tokenCount = itemizedPrompt?.tokenCount;
+        if (tokenCount === undefined) {
+            let rawPrompt = itemizedPrompt?.rawPrompt;
+            if (Array.isArray(rawPrompt)) rawPrompt = rawPrompt.map(x => x.content).join('\n');
+            tokenCount = count_tokens(rawPrompt ?? '');
+        }
+        promptChatTokens += tokenCount;
+    }
+    
+    // Calculate non-chat budget (system prompts, character card, etc.)
+    const nonChatBudget = Math.max(currentPromptSize - promptChatTokens, 0);
+    
+    debug(`  Prompt chat tokens: ${promptChatTokens}`);
+    debug(`  Non-chat budget: ${nonChatBudget}`);
+    
+    // Function to estimate message tokens in prompt
+    function estimateMessagePromptTokens(message, index) {
+        const roleHeaderTokens = message.is_user ? promptHeaderTokens.user : promptHeaderTokens.assistant;
+        return count_tokens(message.mes) + roleHeaderTokens;
+    }
+    
+    // Function to estimate total chat size with given truncation index
+    function estimateChatSize(startIndex) {
+        let total = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const message = chat[i];
+            const kept = i >= startIndex;
+            if (kept) {
+                total += estimateMessagePromptTokens(message, i);
+                continue;
+            }
+            const summary = get_memory(message);
+            if (summary && check_message_exclusion(message)) {
+                total += count_tokens(summary) + sepSize;
+            }
+        }
+        return total;
+    }
+    
+    // Current chat size
+    let currentChatSize = estimateChatSize(currentIndex);
+    
+    debug(`  Current chat size: ${currentChatSize}`);
+    debug(`  Current total: ${currentChatSize + nonChatBudget}`);
+    
+    // If we're over target, truncate in batches
+    if (currentChatSize + nonChatBudget > targetSize) {
+        while (currentChatSize + nonChatBudget > targetSize && nextIndex < maxIndex) {
+            let stepEnd = nextIndex;
+            
+            // Calculate batch end
+            if (batchSize > 0) {
+                stepEnd = Math.min(nextIndex + batchSize, maxIndex);
+            }
+            
+            // Estimate chat size after this batch
+            const candidateChatSize = estimateChatSize(stepEnd);
+            
+            // If this gets us under target, we're done
+            if (candidateChatSize + nonChatBudget <= targetSize) {
+                // Try to find exact message that gets us under
+                for (let i = nextIndex; i < stepEnd; i++) {
+                    const partialSize = estimateChatSize(i + 1);
+                    if (partialSize + nonChatBudget <= targetSize) {
+                        nextIndex = i + 1;
+                        currentChatSize = partialSize;
+                        break;
+                    }
+                    nextIndex = i + 1;
+                    currentChatSize = partialSize;
+                }
+                break;
+            }
+            
+            // Still over target, continue
+            currentChatSize = candidateChatSize;
+            nextIndex = stepEnd;
         }
     }
     
-    const avgTokensPerMessage = messageCount > 0 ? totalTokens / messageCount : 0;
-    debug(`  Average tokens per message: ${avgTokensPerMessage.toFixed(0)}`);
+    const finalIndex = Math.max(nextIndex, currentIndex);
     
-    // Estimate messages to truncate
-    const messagesToTruncate = Math.ceil(tokensToRemove / avgTokensPerMessage);
-    debug(`  Estimated messages to truncate: ${messagesToTruncate}`);
+    debug(`  Final truncation index: ${finalIndex}`);
+    debug(`  Final chat size: ${estimateChatSize(finalIndex)}`);
+    debug(`  Final total: ${estimateChatSize(finalIndex) + nonChatBudget}`);
     
-    // Round up to nearest batch
-    const batchesToTruncate = Math.ceil(messagesToTruncate / batchSize);
-    
-    // Calculate new index (add to existing truncation)
-    const currentTruncationIndex = TRUNCATION_INDEX || 0;
-    const newIndex = Math.min(
-        currentTruncationIndex + (batchesToTruncate * batchSize),
-        Math.max(chat.length - minKeep, 0)
-    );
-    
-    debug(`  Current truncation index: ${currentTruncationIndex}`);
-    debug(`  New truncation index: ${newIndex} (adding ${batchesToTruncate} batches)`);
-    return newIndex;
+    return finalIndex;
+}
+
+// Helper function to calculate separator size
+function calculate_injection_separator_size(separator = null) {
+    if (separator === null) separator = get_settings('summary_injection_separator');
+    const text = "This is a test.";
+    const t1 = count_tokens(text);
+    const t2 = count_tokens(text + separator + text);
+    return t2 - (2 * t1);
+}
+
+// Helper function to check message exclusion
+function check_message_exclusion(message) {
+    if (!message) return false;
+    if (get_data(message, 'remember')) return true;
+    if (get_data(message, 'exclude')) return false;
+    if (!get_settings('include_user_messages') && message.is_user) return false;
+    if (message.is_thoughts) return false;
+    if (!get_settings('include_system_messages') && message.is_system) return false;
+    const tokenSize = count_tokens(message.mes);
+    if (tokenSize < get_settings('message_length_threshold')) return false;
+    return true;
 }
 
 // Update message inclusion flags (determines which messages to keep/exclude)
