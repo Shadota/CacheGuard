@@ -184,10 +184,32 @@ function perform_batch_truncation(chat) {
     const chatLength = chat.length;
     const maxTruncateUpTo = Math.max(chatLength - minKeep, 0);
     
-    debug(`Starting batch truncation. Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}`);
+    debug(`Starting batch truncation. Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
     
-    // Keep trimming in batches until we're under the target
     let currentSize = get_previous_prompt_size();
+    
+    // Check if we can move the truncation index backward (un-truncate)
+    // This happens when target size increases or messages are added
+    if (TRUNCATION_INDEX > 0) {
+        let testSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
+        
+        // Try moving backward in batches while we're still under target
+        while (TRUNCATION_INDEX > 0 && testSize < targetSize) {
+            const newIndex = Math.max(TRUNCATION_INDEX - batchSize, 0);
+            testSize = estimate_size_after_truncation(chat, newIndex);
+            
+            if (testSize <= targetSize) {
+                debug(`Un-truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
+                TRUNCATION_INDEX = newIndex;
+            } else {
+                // Would exceed target, stop here
+                break;
+            }
+        }
+    }
+    
+    // Now check if we need to move forward (truncate more)
+    currentSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
     
     while (currentSize > targetSize && TRUNCATION_INDEX < maxTruncateUpTo) {
         // Advance truncation index by batch size
