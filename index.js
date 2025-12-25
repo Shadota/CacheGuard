@@ -138,19 +138,12 @@ function should_truncate() {
     return shouldTrunc;
 }
 
+// NOTE: This function is unreliable because it can't account for system prompts,
+// formatting, and other overhead. We use previous prompt size instead.
 function estimate_size_after_truncation(chat, truncateUpTo) {
-    let total = 0;
-    
-    for (let i = truncateUpTo; i < chat.length; i++) {
-        if (!chat[i].is_system) {
-            total += count_tokens(chat[i].mes);
-        }
-    }
-    
-    // Add overhead estimate for system prompts, etc.
-    total += 500;
-    
-    return total;
+    // This is just a placeholder - we don't actually use this for decisions anymore
+    // We rely on the ACTUAL previous prompt size from the last generation
+    return get_previous_prompt_size();
 }
 
 function apply_truncation(chat, truncateUpTo) {
@@ -190,45 +183,25 @@ function perform_batch_truncation(chat) {
     
     debug(`Starting batch truncation. Chat length: ${chatLength}, Max truncate: ${maxTruncateUpTo}, Current index: ${TRUNCATION_INDEX}`);
     
-    let currentSize = get_previous_prompt_size();
+    const currentSize = get_previous_prompt_size();
+    debug(`Current prompt size: ${currentSize}, Target: ${targetSize}`);
     
-    // Check if we can move the truncation index backward (un-truncate)
-    // This happens when target size increases or messages are added
-    if (TRUNCATION_INDEX > 0) {
-        // Try moving backward in batches while we're still under target
-        while (TRUNCATION_INDEX > 0) {
-            const newIndex = Math.max(TRUNCATION_INDEX - batchSize, 0);
-            const testSize = estimate_size_after_truncation(chat, newIndex);
-            
-            debug(`Testing un-truncation: index ${TRUNCATION_INDEX} -> ${newIndex}, estimated size: ${testSize}`);
-            
-            // Only move backward if the new position stays under target
-            if (testSize <= targetSize) {
-                debug(`Un-truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
-                TRUNCATION_INDEX = newIndex;
-            } else {
-                // Would exceed target, stop here
-                debug(`Would exceed target (${testSize} > ${targetSize}), stopping at index ${TRUNCATION_INDEX}`);
-                break;
-            }
-        }
-    }
+    // Simple logic: If over target, truncate one batch. If under target, un-truncate one batch.
+    // This is more reliable than trying to estimate the final size.
     
-    // Now check if we need to move forward (truncate more)
-    currentSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
-    
-    while (currentSize > targetSize && TRUNCATION_INDEX < maxTruncateUpTo) {
-        // Advance truncation index by batch size
+    if (currentSize > targetSize && TRUNCATION_INDEX < maxTruncateUpTo) {
+        // Over target - truncate one batch forward
         const newIndex = Math.min(TRUNCATION_INDEX + batchSize, maxTruncateUpTo);
-        
-        debug(`Truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
-        
+        debug(`Over target, truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
         TRUNCATION_INDEX = newIndex;
-        
-        // Recalculate size after this batch
-        currentSize = estimate_size_after_truncation(chat, TRUNCATION_INDEX);
-        
-        debug(`Estimated size after truncation: ${currentSize} tokens`);
+    } else if (currentSize < targetSize && TRUNCATION_INDEX > 0) {
+        // Under target - un-truncate one batch backward
+        const newIndex = Math.max(TRUNCATION_INDEX - batchSize, 0);
+        debug(`Under target, un-truncating batch: index ${TRUNCATION_INDEX} -> ${newIndex}`);
+        TRUNCATION_INDEX = newIndex;
+    } else {
+        // Within acceptable range or at limits
+        debug(`No truncation change needed. Size: ${currentSize}, Target: ${targetSize}, Index: ${TRUNCATION_INDEX}`);
     }
     
     // Apply truncation to chat
@@ -280,7 +253,7 @@ function update_status_display() {
         $('#ct_current_size').css('color', '#44ff44');
     } else {
         // Within ±10% of target - YELLOW
-        $('#ct_current_size').css('color', 'var(--SmartThemeEmColor)');
+        $('#ct_current_size').css('color', '#ffdd44');
     }
 }
 
