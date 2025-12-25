@@ -294,7 +294,6 @@ function perform_batch_truncation(chat, currentContextSize) {
         
         debug(`Moving truncation index from ${TRUNCATION_INDEX} to ${targetIndex}`);
         TRUNCATION_INDEX = targetIndex;
-        save_truncation_index();
     }
     // If we're over-truncated and can un-truncate
     else if (tokensToRemove < 0 && TRUNCATION_INDEX > 0) {
@@ -307,8 +306,10 @@ function perform_batch_truncation(chat, currentContextSize) {
         
         debug(`Moving truncation index backward from ${TRUNCATION_INDEX} to ${targetIndex}`);
         TRUNCATION_INDEX = targetIndex;
-        save_truncation_index();
     }
+    
+    // Save the truncation index after adjusting it
+    save_truncation_index();
     
     // Apply truncation to chat
     return apply_truncation(chat, TRUNCATION_INDEX);
