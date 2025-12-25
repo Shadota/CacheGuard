@@ -326,7 +326,13 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     // ALWAYS run truncation logic to maintain the truncation index
     // This is necessary because we need to re-apply truncation markers each generation
     debug('Running batch truncation logic');
-    return perform_batch_truncation(chat, contextSize);
+    
+    // Modify the chat array and also update ctx.chat to ensure ST uses our changes
+    const truncatedChat = perform_batch_truncation(chat, contextSize);
+    const ctx = getContext();
+    ctx.chat = truncatedChat;
+    
+    return truncatedChat;
 };
 
 // Status display updates
