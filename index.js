@@ -343,7 +343,7 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     
     debug(`Intercepting messages. Type: ${type}, Context: ${contextSize}`);
     
-    // Calculate truncation index FIRST (like MessageSummarize's refresh_memory())
+    // Calculate truncation index FIRST
     const batchSize = get_settings('batch_size');
     const minKeep = get_settings('min_messages_to_keep');
     const targetSize = get_settings('target_context_size');
@@ -395,33 +395,47 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
         }
     }
     
-    // Now apply IGNORE_SYMBOL like MessageSummarize does (line 4105-4111)
+    // Apply IGNORE_SYMBOL to mark messages for exclusion
     let start = chat.length - 1;
-    if (type === 'continue') start--;  // if a continue, keep the most recent message
+    if (type === 'continue') start--;
     
     const ctx = getContext();
     const IGNORE_SYMBOL = ctx.symbols.ignore;
     
-    // Mark messages for exclusion
     for (let i = start; i >= 0; i--) {
-        delete chat[i].extra?.ignore_formatting;  // prevent conflicts
+        delete chat[i].extra?.ignore_formatting;
         
-        // Check if this message should be kept (lagging = true means KEEP)
         const shouldKeep = i >= TRUNCATION_INDEX;
         
-        chat[i] = structuredClone(chat[i]);  // keep changes temporary
+        chat[i] = structuredClone(chat[i]);
         
         if (!chat[i].extra) {
             chat[i].extra = {};
         }
         
-        // Set IGNORE_SYMBOL: true = ignore, false = keep
         chat[i].extra[IGNORE_SYMBOL] = !shouldKeep;
     }
     
     debug(`Applied IGNORE_SYMBOL to ${TRUNCATION_INDEX} messages`);
     
-    return chat;  // Return the modified chat array
+    // INJECT A PLACEHOLDER SUMMARY for the truncated messages
+    if (TRUNCATION_INDEX > 0) {
+        const summaryText = `[${TRUNCATION_INDEX} earlier messages truncated to save context]`;
+        
+        // Inject as extension prompt (like MessageSummarize does)
+        ctx.setExtensionPrompt(
+            `${MODULE_NAME}_truncation_notice`,
+            summaryText,
+            1,  // position: IN_PROMPT
+            4,  // depth
+            false,  // scan
+            0  // role: SYSTEM
+        );
+        
+        debug(`Injected truncation notice: "${summaryText}"`);
+    }
+    
+    return chat;
 };
 
 // Status display updates
