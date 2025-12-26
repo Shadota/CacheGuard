@@ -742,32 +742,6 @@ function update_status_display() {
         }
     }
     
-    // Diagnostic logging: analyze itemizedPrompts
-    const ctx = getContext();
-    const itemized = ctx.getLastItemizedPrompts();
-    if (itemized && get_settings('debug_mode')) {
-        debug('=== ITEMIZED PROMPTS ANALYSIS ===');
-        let totalItemized = 0;
-        for (const [key, value] of Object.entries(itemized)) {
-            const tokens = count_tokens(value);
-            totalItemized += tokens;
-            debug(`  ${key}: ${tokens} tokens`);
-        }
-        debug(`  TOTAL from itemized: ${totalItemized} tokens`);
-        debug(`  ACTUAL from raw prompt: ${actualSize} tokens`);
-        debug(`  DIFFERENCE: ${totalItemized - actualSize} tokens`);
-        
-        // Analyze chat messages specifically
-        if (itemized.chatHistory) {
-            const chatTokens = count_tokens(itemized.chatHistory);
-            const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
-            const segmentTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
-            debug(`  Chat from itemized: ${chatTokens} tokens`);
-            debug(`  Chat from segments: ${segmentTokens} tokens`);
-            debug(`  Chat difference: ${chatTokens - segmentTokens} tokens`);
-        }
-    }
-    
     // Determine color based on error percentage
     let bgColor, textColor;
     if (percentError <= 5) {
