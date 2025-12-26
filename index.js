@@ -689,10 +689,8 @@ function update_status_display() {
     const difference = actualSize - targetSize;
     const percentError = Math.abs((difference / targetSize) * 100);
     
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     // Diagnostic logging: compare prediction with actual
-    if (get_settings('debug') && LAST_PREDICTED_SIZE > 0) {
+    if (get_settings('debug_mode') && LAST_PREDICTED_SIZE > 0) {
         debug('=== PREDICTION vs ACTUAL ANALYSIS ===');
         debug(`  PREDICTED total: ${LAST_PREDICTED_SIZE} tokens`);
         debug(`  PREDICTED chat: ${LAST_PREDICTED_CHAT_SIZE} tokens`);
@@ -711,13 +709,10 @@ function update_status_display() {
         debug(`  Non-chat difference: ${LAST_PREDICTED_NON_CHAT_SIZE - actualNonChatTokens} tokens`);
     }
     
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     // Diagnostic logging: analyze itemizedPrompts
+    const ctx = getContext();
     const itemized = ctx.getLastItemizedPrompts();
-    if (itemized && get_settings('debug')) {
+    if (itemized && get_settings('debug_mode')) {
         debug('=== ITEMIZED PROMPTS ANALYSIS ===');
         let totalItemized = 0;
         for (const [key, value] of Object.entries(itemized)) {
