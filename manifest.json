@@ -1,12 +1,12 @@
 {
-  "display_name": "Context Truncator with Summarization",
-  "loading_order": 9999,
+  "display_name": "Enhanced Memory (Truncation + Qdrant)",
+  "loading_order": 100,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "Based on Qvink Memory by Qvink",
-  "version": "1.0.0",
+  "author": "Based on Qvink Memory and st-qdrant-memory",
+  "version": "2.0.0",
   "homePage": "https://github.com/yourusername/SillyTavern-Context-Truncator",
   "generate_interceptor": "truncator_intercept_messages"
 }

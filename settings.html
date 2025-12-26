@@ -1,134 +1,375 @@
 <div id="context_truncator_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Context Truncator with Summarization</b>
+            <b>Enhanced Memory (Truncation + Qdrant)</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <!-- Enable/Disable -->
-            <div class="flex-container flexFlowColumn">
-                <label class="checkbox_label" for="ct_enabled">
-                    <input id="ct_enabled" type="checkbox" />
-                    <span>Enable Context Truncator</span>
-                </label>
-                <small>Enable or disable the extension</small>
-            </div>
-
-            <hr>
-
-            <!-- Truncation Settings -->
-            <h4>Truncation Settings</h4>
             
-            <div class="flex-container flexFlowColumn">
-                <label for="ct_target_size">
-                    <span>Target Context Size (tokens)</span>
-                </label>
-                <input id="ct_target_size" class="text_pole" type="number" min="1000" max="200000" step="1000" />
-                <small>Target prompt size in tokens. The extension learns and adapts over 2-3 generations to reach this target. Typical accuracy: 10-15% (conservative, under target).</small>
-            </div>
-
-            <div class="flex-container flexFlowColumn">
-                <label for="ct_batch_size">
-                    <span>Batch Size (messages)</span>
-                </label>
-                <input id="ct_batch_size" class="text_pole" type="number" min="1" max="100" step="1" />
-                <small>Number of messages to truncate at once. Larger batches are more cache-efficient.</small>
-            </div>
-
-            <div class="flex-container flexFlowColumn">
-                <label for="ct_min_keep">
-                    <span>Minimum Messages to Keep</span>
-                </label>
-                <input id="ct_min_keep" class="text_pole" type="number" min="1" max="100" step="1" />
-                <small>Minimum number of recent messages to always keep in context (safety limit).</small>
-            </div>
-
-            <hr>
-
-            <!-- Summarization Settings -->
-            <h4>Summarization Settings</h4>
-            
-            <div class="flex-container flexFlowColumn">
-                <label class="checkbox_label" for="ct_auto_summarize">
-                    <input id="ct_auto_summarize" type="checkbox" />
-                    <span>Auto-Summarize Messages</span>
-                </label>
-                <small>Automatically summarize messages when they are truncated from context</small>
-            </div>
-
-            <div class="flex-container flexFlowColumn">
-                <label for="ct_connection_profile">
-                    <span>Connection Profile</span>
-                </label>
-                <select id="ct_connection_profile" class="text_pole"></select>
-                <small>Choose a different model for summarization. "Same as Current" uses your main model. Allows background summarization while roleplaying.</small>
-            </div>
-
-            <div class="flex-container flexFlowColumn">
-                <label for="ct_max_words">
-                    <span>Maximum Words per Summary</span>
-                </label>
-                <input id="ct_max_words" class="text_pole" type="number" min="10" max="200" step="5" />
-                <small>Maximum number of words allowed in each summary (default: 50)</small>
-            </div>
-
-            <div class="flex-container flexFlowColumn">
-                <button id="ct_summarize_all" class="menu_button">
-                    <i class="fa-solid fa-compress"></i>
-                    <span>Summarize All Messages</span>
+            <!-- Tab Navigation -->
+            <div class="ct_tabs">
+                <button class="ct_tab ct_tab_active" data-tab="truncation">
+                    <i class="fa-solid fa-scissors"></i> Truncation
                 </button>
-                <small>Manually summarize all messages in the current chat that don't have summaries yet</small>
+                <button class="ct_tab" data-tab="qdrant">
+                    <i class="fa-solid fa-brain"></i> Qdrant Memory
+                </button>
+                <button class="ct_tab" data-tab="synergy">
+                    <i class="fa-solid fa-link"></i> Synergy
+                </button>
             </div>
 
-            <hr>
-
-            <!-- Status and Controls -->
-            <h4>Status and Controls</h4>
-            
-            <div class="flex-container flexFlowColumn">
-                <div id="ct_status_display" style="padding: 10px; border-radius: 5px; margin-bottom: 10px; display: none;">
-                    <div style="font-weight: bold; margin-bottom: 5px;">Last Generation:</div>
-                    <div id="ct_status_text"></div>
+            <!-- ==================== TRUNCATION TAB ==================== -->
+            <div class="ct_tab_content ct_tab_content_active" data-tab="truncation">
+                
+                <!-- Enable/Disable -->
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_enabled">
+                        <input id="ct_enabled" type="checkbox" />
+                        <span>Enable Context Truncator</span>
+                    </label>
+                    <small>Enable or disable context truncation</small>
                 </div>
-            </div>
-            
-            <div class="flex-container flexFlowColumn">
-                <button id="ct_reset" class="menu_button">
-                    <i class="fa-solid fa-rotate-left"></i>
-                    <span>Reset Truncation</span>
-                </button>
-                <small>Reset truncation index and restart adaptive learning. Use this if you change target size or want to recalculate from scratch.</small>
+
+                <hr>
+
+                <!-- Truncation Settings -->
+                <h4>Truncation Settings</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_target_size">
+                        <span>Target Context Size (tokens)</span>
+                    </label>
+                    <input id="ct_target_size" class="text_pole" type="number" min="1000" max="200000" step="1000" />
+                    <small>Target prompt size in tokens. The extension learns and adapts over 2-3 generations to reach this target. Typical accuracy: 10-15% (conservative, under target).</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_batch_size">
+                        <span>Batch Size (messages)</span>
+                    </label>
+                    <input id="ct_batch_size" class="text_pole" type="number" min="1" max="100" step="1" />
+                    <small>Number of messages to truncate at once. Larger batches are more cache-efficient.</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_min_keep">
+                        <span>Minimum Messages to Keep</span>
+                    </label>
+                    <input id="ct_min_keep" class="text_pole" type="number" min="1" max="100" step="1" />
+                    <small>Minimum number of recent messages to always keep in context (safety limit).</small>
+                </div>
+
+                <hr>
+
+                <!-- Summarization Settings -->
+                <h4>Summarization Settings</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_auto_summarize">
+                        <input id="ct_auto_summarize" type="checkbox" />
+                        <span>Auto-Summarize Messages</span>
+                    </label>
+                    <small>Automatically summarize messages when they are truncated from context</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_connection_profile">
+                        <span>Connection Profile</span>
+                    </label>
+                    <select id="ct_connection_profile" class="text_pole"></select>
+                    <small>Choose a different model for summarization. "Same as Current" uses your main model. Allows background summarization while roleplaying.</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_max_words">
+                        <span>Maximum Words per Summary</span>
+                    </label>
+                    <input id="ct_max_words" class="text_pole" type="number" min="10" max="200" step="5" />
+                    <small>Maximum number of words allowed in each summary (default: 50)</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <button id="ct_summarize_all" class="menu_button">
+                        <i class="fa-solid fa-compress"></i>
+                        <span>Summarize All Messages</span>
+                    </button>
+                    <small>Manually summarize all messages in the current chat that don't have summaries yet</small>
+                </div>
+
+                <hr>
+
+                <!-- Status and Controls -->
+                <h4>Status and Controls</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <div id="ct_status_display" style="padding: 10px; border-radius: 5px; margin-bottom: 10px; display: none;">
+                        <div style="font-weight: bold; margin-bottom: 5px;">Last Generation:</div>
+                        <div id="ct_status_text"></div>
+                    </div>
+                </div>
+                
+                <div class="flex-container flexFlowColumn">
+                    <button id="ct_reset" class="menu_button">
+                        <i class="fa-solid fa-rotate-left"></i>
+                        <span>Reset Truncation</span>
+                    </button>
+                    <small>Reset truncation index and restart adaptive learning. Use this if you change target size or want to recalculate from scratch.</small>
+                </div>
+
+                <hr>
+
+                <!-- Debug Mode -->
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_debug">
+                        <input id="ct_debug" type="checkbox" />
+                        <span>Debug Mode</span>
+                    </label>
+                    <small>Enable detailed console logging for troubleshooting</small>
+                </div>
+
             </div>
 
-            <hr>
+            <!-- ==================== QDRANT MEMORY TAB ==================== -->
+            <div class="ct_tab_content" data-tab="qdrant">
+                
+                <!-- Master Enable/Disable -->
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_qdrant_enabled">
+                        <input id="ct_qdrant_enabled" type="checkbox" />
+                        <span><strong>Enable Qdrant Vector Memory</strong></span>
+                    </label>
+                    <small>Enable semantic memory retrieval from Qdrant vector database</small>
+                </div>
 
-            <!-- Debug Mode -->
-            <div class="flex-container flexFlowColumn">
-                <label class="checkbox_label" for="ct_debug">
-                    <input id="ct_debug" type="checkbox" />
-                    <span>Debug Mode</span>
-                </label>
-                <small>Enable detailed console logging for troubleshooting</small>
+                <hr>
+
+                <!-- Connection Settings -->
+                <h4>Connection Settings</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_qdrant_url">
+                        <span>Qdrant URL</span>
+                    </label>
+                    <input id="ct_qdrant_url" class="text_pole" type="text" placeholder="http://localhost:6333" />
+                    <small>URL of your Qdrant instance</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_qdrant_collection">
+                        <span>Base Collection Name</span>
+                    </label>
+                    <input id="ct_qdrant_collection" class="text_pole" type="text" placeholder="sillytavern_memories" />
+                    <small>Base name for collections (character/chat name will be appended)</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <button id="ct_qdrant_test" class="menu_button">
+                        <i class="fa-solid fa-plug"></i>
+                        <span>Test Connection</span>
+                    </button>
+                    <div id="ct_qdrant_status" class="ct_status_message" style="margin-top: 8px;"></div>
+                </div>
+
+                <hr>
+
+                <!-- Embedding Settings (Local/KoboldCPP Only) -->
+                <h4>Embedding Settings</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_embedding_url">
+                        <span>Embedding Endpoint URL</span>
+                    </label>
+                    <input id="ct_embedding_url" class="text_pole" type="text" placeholder="http://localhost:5001/api/extra/embeddings" />
+                    <small>KoboldCPP or compatible embedding endpoint (OpenAI-compatible format)</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_embedding_api_key">
+                        <span>Embedding API Key (optional)</span>
+                    </label>
+                    <input id="ct_embedding_api_key" class="text_pole" type="password" placeholder="Leave empty if not required" />
+                    <small>Bearer token if your endpoint requires authentication</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_embedding_dimensions">
+                        <span>Embedding Dimensions (auto-detected)</span>
+                    </label>
+                    <input id="ct_embedding_dimensions" class="text_pole" type="number" min="1" step="1" placeholder="Auto-detect on first use" />
+                    <small>Vector size returned by your embedding model. Leave blank to auto-detect.</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <button id="ct_test_embedding" class="menu_button">
+                        <i class="fa-solid fa-vial"></i>
+                        <span>Test Embedding</span>
+                    </button>
+                    <div id="ct_embedding_status" class="ct_status_message" style="margin-top: 8px;"></div>
+                </div>
+
+                <hr>
+
+                <!-- Memory Retrieval Settings -->
+                <h4>Memory Retrieval</h4>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_memory_limit">
+                        <span>Number of Memories: <span id="ct_memory_limit_display">5</span></span>
+                    </label>
+                    <input id="ct_memory_limit" class="text_pole" type="range" min="1" max="20" value="5" />
+                    <small>Maximum memories to retrieve per generation</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_score_threshold">
+                        <span>Relevance Threshold: <span id="ct_score_threshold_display">0.3</span></span>
+                    </label>
+                    <input id="ct_score_threshold" class="text_pole" type="range" min="0" max="1" step="0.05" value="0.3" />
+                    <small>Minimum similarity score (0.0 - 1.0). Higher = more relevant results only.</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_memory_position">
+                        <span>Memory Position: <span id="ct_memory_position_display">2</span></span>
+                    </label>
+                    <input id="ct_memory_position" class="text_pole" type="range" min="1" max="30" value="2" />
+                    <small>Insert memories N messages from the end of chat</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label for="ct_retain_recent">
+                        <span>Exclude Recent Messages: <span id="ct_retain_recent_display">5</span></span>
+                    </label>
+                    <input id="ct_retain_recent" class="text_pole" type="range" min="0" max="50" value="5" />
+                    <small>Don't retrieve memories from the last N messages (they're already in context)</small>
+                </div>
+
+                <hr>
+
+                <!-- Automatic Memory Creation -->
+                <h4>Automatic Memory Creation</h4>
+
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_auto_save_memories">
+                        <input id="ct_auto_save_memories" type="checkbox" checked />
+                        <span>Auto-Save Memories</span>
+                    </label>
+                    <small>Automatically save messages to Qdrant as conversations happen</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_save_user_messages">
+                        <input id="ct_save_user_messages" type="checkbox" checked />
+                        <span>Save User Messages</span>
+                    </label>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_save_char_messages">
+                        <input id="ct_save_char_messages" type="checkbox" checked />
+                        <span>Save Character Messages</span>
+                    </label>
+                </div>
+
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_per_chat_collection">
+                        <input id="ct_per_chat_collection" type="checkbox" checked />
+                        <span>Use Per-Chat Collections</span>
+                    </label>
+                    <small>Each chat gets its own collection (recommended). Otherwise all chats share one collection per character.</small>
+                </div>
+
+                <hr>
+
+                <!-- Memory Management -->
+                <h4>Memory Management</h4>
+
+                <div class="flex-container flexFlowColumn">
+                    <button id="ct_index_chats" class="menu_button">
+                        <i class="fa-solid fa-database"></i>
+                        <span>Index Current Chat</span>
+                    </button>
+                    <small>Index all messages from current chat to Qdrant</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn" style="margin-top: 10px;">
+                    <button id="ct_view_memories" class="menu_button">
+                        <i class="fa-solid fa-eye"></i>
+                        <span>View Memories</span>
+                    </button>
+                    <small>View stored memories for current character</small>
+                </div>
+
+                <div class="flex-container flexFlowColumn" style="margin-top: 10px;">
+                    <button id="ct_delete_collection" class="menu_button menu_button_danger">
+                        <i class="fa-solid fa-trash"></i>
+                        <span>Delete Collection</span>
+                    </button>
+                    <small>Delete all memories for current character/chat</small>
+                </div>
+
             </div>
 
-            <hr>
+            <!-- ==================== SYNERGY TAB ==================== -->
+            <div class="ct_tab_content" data-tab="synergy">
+                
+                <div class="ct_info_box">
+                    <i class="fa-solid fa-info-circle"></i>
+                    <span>Synergy features combine truncation and Qdrant memory for enhanced functionality. Requires both systems to be enabled.</span>
+                </div>
 
-            <!-- Info -->
-            <div class="flex-container flexFlowColumn">
-                <small>
-                    <b>How it works:</b><br>
-                    1. Monitors prompt size after each generation<br>
-                    2. When size exceeds target, older messages are marked for truncation<br>
-                    3. Truncated messages are automatically summarized (if enabled)<br>
-                    4. Summaries are injected into the prompt as a compact list<br>
-                    5. Truncation happens in batches for cache efficiency<br>
-                    6. System learns from each generation to improve accuracy<br>
-                    <br>
-                    <b>Adaptive Learning:</b> First generation may be ~20% off target as the system learns. Accuracy improves to ~10-15% over 2-3 generations.<br>
-                    <br>
-                    <b>Note:</b> Summaries are generated using your current AI model. The first truncation may take a moment while summaries are generated.
-                </small>
+                <hr>
+
+                <h4>Summary-as-Chunk</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_use_summaries_for_qdrant">
+                        <input id="ct_use_summaries_for_qdrant" type="checkbox" />
+                        <span>Use Summaries for Qdrant Indexing</span>
+                    </label>
+                    <small>Index AI-generated summaries instead of raw messages. Faster/cheaper but may lose detail.</small>
+                </div>
+
+                <hr>
+
+                <h4>Memory-Aware Summarization</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_memory_aware_summaries">
+                        <input id="ct_memory_aware_summaries" type="checkbox" />
+                        <span>Include Memories in Summary Context</span>
+                    </label>
+                    <small>Retrieve relevant memories when generating summaries for better context.</small>
+                </div>
+
+                <hr>
+
+                <h4>Token Accounting</h4>
+                
+                <div class="flex-container flexFlowColumn">
+                    <label class="checkbox_label" for="ct_account_qdrant_tokens">
+                        <input id="ct_account_qdrant_tokens" type="checkbox" checked />
+                        <span>Account for Qdrant Tokens in Truncation</span>
+                    </label>
+                    <small>Adjust truncation target to account for injected Qdrant memories. Prevents context overflow.</small>
+                </div>
+
+                <hr>
+
+                <!-- Info -->
+                <div class="flex-container flexFlowColumn">
+                    <small>
+                        <b>How Synergy Works:</b><br>
+                        1. Qdrant memories are retrieved based on current conversation<br>
+                        2. If token accounting is enabled, truncation adjusts for memory size<br>
+                        3. Summaries can optionally be indexed to Qdrant for semantic search<br>
+                        4. Memory-aware summarization uses long-term context for better summaries<br>
+                    </small>
+                </div>
+
             </div>
+
         </div>
     </div>
 </div>

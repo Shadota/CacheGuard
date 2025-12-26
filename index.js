@@ -31,10 +31,11 @@ export { MODULE_NAME };
 
 // Module constants
 const MODULE_NAME = 'context_truncator';
-const MODULE_NAME_FANCY = 'Context Truncator';
+const MODULE_NAME_FANCY = 'Enhanced Memory';
 
 // Default settings
 const default_settings = {
+    // ==================== TRUNCATION SETTINGS ====================
     enabled: true,
     target_context_size: 8000,      // Target size in tokens
     batch_size: 20,                 // Messages per batch
@@ -116,6 +117,38 @@ If something is not stated here or in recent chat, do not invent details. If sum
     injection_role: extension_prompt_roles.SYSTEM,
     
     debug_mode: false,
+    
+    // ==================== QDRANT SETTINGS ====================
+    qdrant_enabled: false,
+    qdrant_url: "http://localhost:6333",
+    qdrant_collection: "sillytavern_memories",
+    
+    // Embedding settings (local/KoboldCPP only)
+    embedding_url: "",
+    embedding_api_key: "",
+    embedding_dimensions: null,     // Auto-detected
+    
+    // Memory retrieval settings
+    memory_limit: 5,
+    score_threshold: 0.3,
+    memory_position: 2,
+    retain_recent_messages: 5,
+    
+    // Auto-save settings
+    auto_save_memories: true,
+    save_user_messages: true,
+    save_char_messages: true,
+    per_chat_collection: true,
+    
+    // Chunking settings (from st-qdrant-memory)
+    chunk_min_size: 1200,
+    chunk_max_size: 1500,
+    chunk_timeout: 30000,
+    
+    // ==================== SYNERGY SETTINGS ====================
+    use_summaries_for_qdrant: false,
+    memory_aware_summaries: false,
+    account_qdrant_tokens: true,
 };
 
 // Global state
@@ -438,9 +471,18 @@ function should_recalculate_truncation() {
 function calculate_truncation_index() {
     const ctx = getContext();
     const chat = ctx.chat;
-    const targetSize = get_settings('target_context_size');
+    let targetSize = get_settings('target_context_size');
     const batchSize = get_settings('batch_size');
     const minKeep = get_settings('min_messages_to_keep');
+    
+    // SYNERGY: Account for Qdrant tokens in target size
+    if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
+        const qdrantTokens = get_qdrant_injection_tokens();
+        if (qdrantTokens > 0) {
+            targetSize = targetSize - qdrantTokens;
+            debug(`Synergy: Adjusted target from ${get_settings('target_context_size')} to ${targetSize} (Qdrant: ${qdrantTokens} tokens)`);
+        }
+    }
     
     // Use current context size from intercept
     const currentPromptSize = CURRENT_CONTEXT_SIZE;
@@ -767,14 +809,26 @@ let LAST_PREDICTED_NON_CHAT_SIZE = 0;
 let CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Multiplier for chat token estimates
 
 // Message interception hook (called by SillyTavern before generation)
-globalThis.truncator_intercept_messages = function (chat, contextSize, abort, type) {
-    if (!get_settings('enabled')) return;
+// Note: This is now an async function for Qdrant support
+globalThis.truncator_intercept_messages = async function (chat, contextSize, abort, type) {
+    if (!get_settings('enabled') && !get_settings('qdrant_enabled')) return;
     
     // Store context size for calculation
     CURRENT_CONTEXT_SIZE = contextSize;
     
+    // Refresh Qdrant memories first (async) - if enabled
+    if (get_settings('qdrant_enabled')) {
+        try {
+            await refresh_qdrant_memories();
+        } catch (e) {
+            error('Failed to refresh Qdrant memories:', e);
+        }
+    }
+    
     // Refresh memory state (calculates truncation, sets flags)
-    refresh_memory();
+    if (get_settings('enabled')) {
+        refresh_memory();
+    }
     
     debug(`Intercepting messages. Type: ${type}, Context: ${contextSize}`);
     
@@ -1032,6 +1086,10 @@ function register_event_listeners() {
             TRUNCATION_INDEX = null;
             CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Reset correction factor for new chat
             load_truncation_index();
+            
+            // Clear Qdrant memories for new chat
+            CURRENT_QDRANT_MEMORIES = [];
+            CURRENT_QDRANT_INJECTION = '';
         }
         currentChatId = newChatId;
         refresh_memory();
@@ -1043,16 +1101,40 @@ function register_event_listeners() {
         refresh_memory();
     });
     
-    // Auto-summarize on new messages (don't await - let it run in background)
+    // Auto-summarize and auto-buffer on new character messages
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (id) => {
         if (streamingProcessor && !streamingProcessor.isFinished) return;
-        auto_summarize_chat();  // Don't await - runs in background
+        
+        // Auto-summarize (don't await - runs in background)
+        auto_summarize_chat();
+        
+        // Auto-buffer for Qdrant (if enabled)
+        const ctx = getContext();
+        if (id !== undefined && ctx.chat[id]) {
+            const message = ctx.chat[id];
+            if (!message.is_system) {
+                buffer_message(id, message.mes, false);  // false = character message
+            }
+        }
+        
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(() => update_status_display(), 100);
     });
 
+    // Auto-summarize and auto-buffer on new user messages
     eventSource.on(event_types.USER_MESSAGE_RENDERED, (id) => {
-        auto_summarize_chat();  // Don't await - runs in background
+        // Auto-summarize (don't await - runs in background)
+        auto_summarize_chat();
+        
+        // Auto-buffer for Qdrant (if enabled)
+        const ctx = getContext();
+        if (id !== undefined && ctx.chat[id]) {
+            const message = ctx.chat[id];
+            if (!message.is_system) {
+                buffer_message(id, message.mes, true);  // true = user message
+            }
+        }
+        
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(() => update_status_display(), 100);
     });
@@ -1094,6 +1176,10 @@ function bind_setting(selector, key, type = 'text') {
 function initialize_ui_listeners() {
     log('Initializing UI listeners...');
     
+    // ==================== TAB NAVIGATION ====================
+    initialize_tab_navigation();
+    
+    // ==================== TRUNCATION SETTINGS ====================
     bind_setting('#ct_enabled', 'enabled', 'boolean');
     bind_setting('#ct_target_size', 'target_context_size', 'number');
     bind_setting('#ct_min_keep', 'min_messages_to_keep', 'number');
@@ -1142,6 +1228,876 @@ function initialize_ui_listeners() {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
     });
+    
+    // ==================== QDRANT SETTINGS ====================
+    bind_setting('#ct_qdrant_enabled', 'qdrant_enabled', 'boolean');
+    bind_setting('#ct_qdrant_url', 'qdrant_url', 'text');
+    bind_setting('#ct_qdrant_collection', 'qdrant_collection', 'text');
+    bind_setting('#ct_embedding_url', 'embedding_url', 'text');
+    bind_setting('#ct_embedding_api_key', 'embedding_api_key', 'text');
+    bind_setting('#ct_embedding_dimensions', 'embedding_dimensions', 'number');
+    
+    // Memory retrieval settings with range display updates
+    bind_range_setting('#ct_memory_limit', 'memory_limit', '#ct_memory_limit_display');
+    bind_range_setting('#ct_score_threshold', 'score_threshold', '#ct_score_threshold_display', true);
+    bind_range_setting('#ct_memory_position', 'memory_position', '#ct_memory_position_display');
+    bind_range_setting('#ct_retain_recent', 'retain_recent_messages', '#ct_retain_recent_display');
+    
+    // Auto-save settings
+    bind_setting('#ct_auto_save_memories', 'auto_save_memories', 'boolean');
+    bind_setting('#ct_save_user_messages', 'save_user_messages', 'boolean');
+    bind_setting('#ct_save_char_messages', 'save_char_messages', 'boolean');
+    bind_setting('#ct_per_chat_collection', 'per_chat_collection', 'boolean');
+    
+    // Qdrant action buttons
+    $('#ct_qdrant_test').on('click', test_qdrant_connection);
+    $('#ct_test_embedding').on('click', test_embedding);
+    $('#ct_index_chats').on('click', index_current_chat);
+    $('#ct_delete_collection').on('click', delete_current_collection);
+    
+    // ==================== SYNERGY SETTINGS ====================
+    bind_setting('#ct_use_summaries_qdrant', 'use_summaries_for_qdrant', 'boolean');
+    bind_setting('#ct_memory_aware_summaries', 'memory_aware_summaries', 'boolean');
+    bind_setting('#ct_account_qdrant_tokens', 'account_qdrant_tokens', 'boolean');
+}
+
+// Tab navigation functionality
+function initialize_tab_navigation() {
+    const $tabs = $('.ct_tab');
+    const $panels = $('.ct_tab_content');
+    
+    $tabs.on('click', function() {
+        const targetTab = $(this).data('tab');
+        
+        // Update active tab
+        $tabs.removeClass('ct_tab_active');
+        $(this).addClass('ct_tab_active');
+        
+        // Show target panel, hide others
+        $panels.removeClass('ct_tab_content_active').hide();
+        $(`.ct_tab_content[data-tab="${targetTab}"]`).addClass('ct_tab_content_active').show();
+        
+        debug(`Switched to tab: ${targetTab}`);
+    });
+    
+    // Show first tab by default
+    $tabs.first().addClass('ct_tab_active');
+    $panels.not(':first').hide();
+}
+
+// Bind range input with display value
+function bind_range_setting(selector, key, displaySelector, isFloat = false) {
+    const $element = $(selector);
+    const $display = $(displaySelector);
+    
+    if ($element.length === 0) {
+        error(`No element found for selector [${selector}]`);
+        return;
+    }
+    
+    // Set initial value
+    const initialValue = get_settings(key);
+    $element.val(initialValue);
+    $display.text(isFloat ? initialValue.toFixed(2) : initialValue);
+    
+    // Listen for input (live update) and change (final value)
+    $element.on('input', function() {
+        const value = isFloat ? parseFloat($(this).val()) : parseInt($(this).val());
+        $display.text(isFloat ? value.toFixed(2) : value);
+    });
+    
+    $element.on('change', function() {
+        const value = isFloat ? parseFloat($(this).val()) : parseInt($(this).val());
+        debug(`Setting [${key}] changed to [${value}]`);
+        set_settings(key, value);
+    });
+}
+
+// ==================== QDRANT UTILITY FUNCTIONS ====================
+
+// Test Qdrant connection
+async function test_qdrant_connection() {
+    const url = get_settings('qdrant_url');
+    const $status = $('#ct_qdrant_status');
+    
+    if (!url) {
+        $status.removeClass().addClass('ct_status_message ct_status_error').text('No Qdrant URL configured');
+        return;
+    }
+    
+    $status.removeClass().addClass('ct_status_message ct_status_info').text('Testing connection...');
+    
+    try {
+        const response = await fetch(`${url}/collections`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            const collectionCount = data.result?.collections?.length || 0;
+            $status.removeClass().addClass('ct_status_message ct_status_success')
+                .text(`Connected! ${collectionCount} collection(s) found`);
+            debug(`Qdrant connection successful: ${collectionCount} collections`);
+        } else {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+    } catch (e) {
+        $status.removeClass().addClass('ct_status_message ct_status_error')
+            .text(`Connection failed: ${e.message}`);
+        error('Qdrant connection test failed:', e);
+    }
+}
+
+// Test embedding endpoint
+async function test_embedding() {
+    const url = get_settings('embedding_url');
+    const apiKey = get_settings('embedding_api_key');
+    const $status = $('#ct_embedding_status');
+    
+    if (!url) {
+        $status.removeClass().addClass('ct_status_message ct_status_error').text('No embedding URL configured');
+        return;
+    }
+    
+    $status.removeClass().addClass('ct_status_message ct_status_info').text('Testing embedding...');
+    
+    try {
+        const testText = 'This is a test sentence for embedding generation.';
+        const embedding = await generate_embedding(testText);
+        
+        if (embedding && embedding.length > 0) {
+            // Store detected dimensions
+            set_settings('embedding_dimensions', embedding.length);
+            // Also update the UI field
+            $('#ct_embedding_dimensions').val(embedding.length);
+            $status.removeClass().addClass('ct_status_message ct_status_success')
+                .text(`Success! Dimensions: ${embedding.length}`);
+            debug(`Embedding test successful: ${embedding.length} dimensions`);
+        } else {
+            throw new Error('Empty embedding returned');
+        }
+    } catch (e) {
+        $status.removeClass().addClass('ct_status_message ct_status_error')
+            .text(`Embedding failed: ${e.message}`);
+        error('Embedding test failed:', e);
+    }
+}
+
+// Generate embedding using KoboldCPP/local endpoint (OpenAI-compatible format)
+async function generate_embedding(text) {
+    const url = get_settings('embedding_url');
+    const apiKey = get_settings('embedding_api_key');
+    
+    if (!url) {
+        throw new Error('No embedding URL configured');
+    }
+    
+    const headers = {
+        'Content-Type': 'application/json'
+    };
+    
+    if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    
+    // OpenAI-compatible embedding request format
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            input: text,
+            model: 'text-embedding'  // KoboldCPP ignores this but it's required for format
+        })
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    
+    const data = await response.json();
+    
+    // OpenAI format: data.data[0].embedding
+    if (data.data && data.data[0] && data.data[0].embedding) {
+        return data.data[0].embedding;
+    }
+    
+    // Alternative format: data.embedding
+    if (data.embedding) {
+        return data.embedding;
+    }
+    
+    throw new Error('Unexpected embedding response format');
+}
+
+// Get the current collection name (may include chat-specific suffix)
+function get_current_collection_name() {
+    const baseCollection = get_settings('qdrant_collection');
+    
+    if (!get_settings('per_chat_collection')) {
+        return baseCollection;
+    }
+    
+    // Get chat identifier for per-chat collections
+    const ctx = getContext();
+    if (!ctx.chatId) {
+        return baseCollection;
+    }
+    
+    // Create a safe collection name from chat ID
+    const chatSuffix = ctx.chatId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${baseCollection}_${chatSuffix}`;
+}
+
+// Clear memories for current chat
+async function clear_current_memories() {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) {
+        toastr.error('Qdrant not configured', MODULE_NAME_FANCY);
+        return;
+    }
+    
+    const confirmed = confirm(`Clear all memories from collection "${collection}"?\n\nThis will delete all stored vectors but keep the collection.`);
+    if (!confirmed) return;
+    
+    try {
+        // Delete all points in the collection by deleting and recreating
+        const dimensions = get_settings('embedding_dimensions');
+        
+        if (!dimensions) {
+            toastr.error('Unknown embedding dimensions. Run embedding test first.', MODULE_NAME_FANCY);
+            return;
+        }
+        
+        // Delete collection
+        await fetch(`${url}/collections/${collection}`, {
+            method: 'DELETE'
+        });
+        
+        // Recreate collection
+        await fetch(`${url}/collections/${collection}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                vectors: {
+                    size: dimensions,
+                    distance: 'Cosine'
+                }
+            })
+        });
+        
+        toastr.success(`Cleared memories from "${collection}"`, MODULE_NAME_FANCY);
+        debug(`Cleared all memories from collection: ${collection}`);
+    } catch (e) {
+        toastr.error(`Failed to clear memories: ${e.message}`, MODULE_NAME_FANCY);
+        error('Failed to clear memories:', e);
+    }
+}
+
+// Delete current collection entirely
+async function delete_current_collection() {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) {
+        toastr.error('Qdrant not configured', MODULE_NAME_FANCY);
+        return;
+    }
+    
+    const confirmed = confirm(`DELETE collection "${collection}"?\n\nThis action cannot be undone!`);
+    if (!confirmed) return;
+    
+    try {
+        const response = await fetch(`${url}/collections/${collection}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            toastr.success(`Deleted collection "${collection}"`, MODULE_NAME_FANCY);
+            debug(`Deleted collection: ${collection}`);
+        } else {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    } catch (e) {
+        toastr.error(`Failed to delete collection: ${e.message}`, MODULE_NAME_FANCY);
+        error('Failed to delete collection:', e);
+    }
+}
+
+// ==================== MEMORY BUFFER AND CHUNKING ====================
+
+// Memory buffer for accumulating messages before chunking
+class MemoryBuffer {
+    constructor() {
+        this.messages = [];
+        this.currentSize = 0;
+        this.timeoutHandle = null;
+    }
+    
+    // Add a message to the buffer
+    add(messageData) {
+        this.messages.push(messageData);
+        this.currentSize += messageData.text.length;
+        
+        // Reset timeout
+        this.resetTimeout();
+        
+        // Check if we should flush
+        const maxSize = get_settings('chunk_max_size');
+        if (this.currentSize >= maxSize) {
+            return this.flush();
+        }
+        
+        return null;
+    }
+    
+    // Reset the flush timeout
+    resetTimeout() {
+        if (this.timeoutHandle) {
+            clearTimeout(this.timeoutHandle);
+        }
+        
+        const timeout = get_settings('chunk_timeout');
+        this.timeoutHandle = setTimeout(() => {
+            const chunk = this.flush();
+            if (chunk) {
+                // Process the chunk asynchronously
+                process_and_store_chunk(chunk).catch(e => {
+                    error('Failed to process chunk on timeout:', e);
+                });
+            }
+        }, timeout);
+    }
+    
+    // Flush the buffer and return a chunk
+    flush() {
+        if (this.messages.length === 0) {
+            return null;
+        }
+        
+        const minSize = get_settings('chunk_min_size');
+        
+        // Don't flush if under minimum size (unless forced)
+        if (this.currentSize < minSize) {
+            debug(`Buffer size ${this.currentSize} < min ${minSize}, not flushing`);
+            return null;
+        }
+        
+        // Create chunk from buffered messages
+        const chunk = this.createChunk();
+        
+        // Clear buffer
+        this.messages = [];
+        this.currentSize = 0;
+        
+        if (this.timeoutHandle) {
+            clearTimeout(this.timeoutHandle);
+            this.timeoutHandle = null;
+        }
+        
+        return chunk;
+    }
+    
+    // Force flush regardless of size
+    forceFlush() {
+        if (this.messages.length === 0) {
+            return null;
+        }
+        
+        const chunk = this.createChunk();
+        
+        this.messages = [];
+        this.currentSize = 0;
+        
+        if (this.timeoutHandle) {
+            clearTimeout(this.timeoutHandle);
+            this.timeoutHandle = null;
+        }
+        
+        return chunk;
+    }
+    
+    // Create a chunk from current messages
+    createChunk() {
+        const ctx = getContext();
+        
+        // Combine message texts
+        const texts = this.messages.map(m => {
+            const prefix = m.isUser ? (ctx.name1 || 'User') : (ctx.name2 || 'Character');
+            return `${prefix}: ${m.text}`;
+        });
+        
+        const combinedText = texts.join('\n\n');
+        
+        // Get temporal boundaries
+        const firstMsg = this.messages[0];
+        const lastMsg = this.messages[this.messages.length - 1];
+        
+        return {
+            text: combinedText,
+            messageIndexes: this.messages.map(m => m.index),
+            firstIndex: firstMsg.index,
+            lastIndex: lastMsg.index,
+            timestamp: Date.now(),
+            characterName: ctx.name2 || 'Unknown',
+            chatId: ctx.chatId
+        };
+    }
+    
+    // Get current buffer state
+    getState() {
+        return {
+            messageCount: this.messages.length,
+            currentSize: this.currentSize,
+            hasTimeout: this.timeoutHandle !== null
+        };
+    }
+}
+
+// Global memory buffer instance
+const memoryBuffer = new MemoryBuffer();
+
+// Process and store a chunk to Qdrant
+async function process_and_store_chunk(chunk) {
+    if (!get_settings('qdrant_enabled')) {
+        debug('Qdrant disabled, skipping chunk storage');
+        return;
+    }
+    
+    debug(`Processing chunk: ${chunk.messageIndexes.length} messages, ${chunk.text.length} chars`);
+    
+    try {
+        // Generate embedding for the chunk
+        const embedding = await generate_embedding(chunk.text);
+        
+        if (!embedding || embedding.length === 0) {
+            throw new Error('Failed to generate embedding');
+        }
+        
+        // Ensure collection exists
+        await ensure_collection_exists();
+        
+        // Create point for Qdrant
+        const point = {
+            id: generate_point_id(),
+            vector: embedding,
+            payload: {
+                text: chunk.text,
+                message_indexes: chunk.messageIndexes,
+                first_index: chunk.firstIndex,
+                last_index: chunk.lastIndex,
+                timestamp: chunk.timestamp,
+                character_name: chunk.characterName,
+                chat_id: chunk.chatId
+            }
+        };
+        
+        // Upsert to Qdrant
+        await upsert_points([point]);
+        
+        debug(`Stored chunk with ${chunk.messageIndexes.length} messages to Qdrant`);
+        
+    } catch (e) {
+        error('Failed to process and store chunk:', e);
+        throw e;
+    }
+}
+
+// Generate a unique point ID
+function generate_point_id() {
+    // Use timestamp + random for uniqueness
+    return `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+// ==================== QDRANT STORAGE FUNCTIONS ====================
+
+// Ensure collection exists with correct configuration
+async function ensure_collection_exists() {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    const dimensions = get_settings('embedding_dimensions');
+    
+    if (!url || !collection) {
+        throw new Error('Qdrant not configured');
+    }
+    
+    if (!dimensions) {
+        throw new Error('Embedding dimensions not set. Run embedding test first.');
+    }
+    
+    try {
+        // Check if collection exists
+        const checkResponse = await fetch(`${url}/collections/${collection}`, {
+            method: 'GET'
+        });
+        
+        if (checkResponse.ok) {
+            debug(`Collection ${collection} already exists`);
+            return;
+        }
+        
+        // Create collection
+        debug(`Creating collection ${collection} with ${dimensions} dimensions`);
+        
+        const createResponse = await fetch(`${url}/collections/${collection}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                vectors: {
+                    size: dimensions,
+                    distance: 'Cosine'
+                }
+            })
+        });
+        
+        if (!createResponse.ok) {
+            const errorText = await createResponse.text();
+            throw new Error(`Failed to create collection: ${errorText}`);
+        }
+        
+        debug(`Created collection ${collection}`);
+        
+    } catch (e) {
+        error('Failed to ensure collection exists:', e);
+        throw e;
+    }
+}
+
+// Upsert points to Qdrant
+async function upsert_points(points) {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) {
+        throw new Error('Qdrant not configured');
+    }
+    
+    const response = await fetch(`${url}/collections/${collection}/points`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            points: points
+        })
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to upsert points: ${errorText}`);
+    }
+    
+    debug(`Upserted ${points.length} points to ${collection}`);
+}
+
+// Search for similar memories
+async function search_memories(queryText, limit = null, scoreThreshold = null) {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) {
+        throw new Error('Qdrant not configured');
+    }
+    
+    limit = limit ?? get_settings('memory_limit');
+    scoreThreshold = scoreThreshold ?? get_settings('score_threshold');
+    
+    try {
+        // Generate embedding for query
+        const queryEmbedding = await generate_embedding(queryText);
+        
+        if (!queryEmbedding || queryEmbedding.length === 0) {
+            throw new Error('Failed to generate query embedding');
+        }
+        
+        // Build search request
+        const searchBody = {
+            vector: queryEmbedding,
+            limit: limit,
+            score_threshold: scoreThreshold,
+            with_payload: true
+        };
+        
+        const response = await fetch(`${url}/collections/${collection}/points/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(searchBody)
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Search failed: ${errorText}`);
+        }
+        
+        const data = await response.json();
+        const results = data.result || [];
+        
+        debug(`Search returned ${results.length} results`);
+        
+        return results.map(r => ({
+            id: r.id,
+            score: r.score,
+            text: r.payload.text,
+            messageIndexes: r.payload.message_indexes,
+            firstIndex: r.payload.first_index,
+            lastIndex: r.payload.last_index,
+            timestamp: r.payload.timestamp,
+            characterName: r.payload.character_name,
+            chatId: r.payload.chat_id
+        }));
+        
+    } catch (e) {
+        error('Failed to search memories:', e);
+        throw e;
+    }
+}
+
+// Get collection info
+async function get_collection_info() {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) {
+        return null;
+    }
+    
+    try {
+        const response = await fetch(`${url}/collections/${collection}`, {
+            method: 'GET'
+        });
+        
+        if (!response.ok) {
+            return null;
+        }
+        
+        const data = await response.json();
+        return data.result;
+        
+    } catch (e) {
+        debug('Failed to get collection info:', e);
+        return null;
+    }
+}
+
+// Add a message to the memory buffer
+function buffer_message(index, text, isUser) {
+    if (!get_settings('qdrant_enabled')) return;
+    if (!get_settings('auto_save_memories')) return;
+    if (isUser && !get_settings('save_user_messages')) return;
+    if (!isUser && !get_settings('save_char_messages')) return;
+    
+    // SYNERGY: Use summaries for Qdrant if enabled and available
+    let textToBuffer = text;
+    if (get_settings('use_summaries_for_qdrant')) {
+        const ctx = getContext();
+        const message = ctx.chat[index];
+        const summary = get_memory(message);
+        if (summary) {
+            textToBuffer = summary;
+            debug(`Using summary for Qdrant indexing (message ${index})`);
+        }
+    }
+    
+    debug(`Buffering message ${index}: ${textToBuffer.substring(0, 50)}...`);
+    
+    const chunk = memoryBuffer.add({
+        index: index,
+        text: textToBuffer,
+        isUser: isUser,
+        timestamp: Date.now()
+    });
+    
+    if (chunk) {
+        // Process the chunk asynchronously
+        process_and_store_chunk(chunk).catch(e => {
+            error('Failed to process chunk:', e);
+        });
+    }
+}
+
+// Index entire current chat
+async function index_current_chat() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!get_settings('qdrant_enabled')) {
+        toastr.error('Qdrant is not enabled', MODULE_NAME_FANCY);
+        return;
+    }
+    
+    toastr.info('Indexing current chat...', MODULE_NAME_FANCY);
+    
+    let indexed = 0;
+    let chunks = [];
+    
+    // Create temporary buffer for indexing
+    const indexBuffer = new MemoryBuffer();
+    
+    for (let i = 0; i < chat.length; i++) {
+        const message = chat[i];
+        
+        // Skip system messages
+        if (message.is_system) continue;
+        
+        const isUser = message.is_user;
+        
+        // Check if we should save this type
+        if (isUser && !get_settings('save_user_messages')) continue;
+        if (!isUser && !get_settings('save_char_messages')) continue;
+        
+        const chunk = indexBuffer.add({
+            index: i,
+            text: message.mes,
+            isUser: isUser,
+            timestamp: Date.now()
+        });
+        
+        if (chunk) {
+            chunks.push(chunk);
+        }
+        
+        indexed++;
+    }
+    
+    // Flush any remaining messages
+    const finalChunk = indexBuffer.forceFlush();
+    if (finalChunk) {
+        chunks.push(finalChunk);
+    }
+    
+    // Process all chunks
+    let stored = 0;
+    for (const chunk of chunks) {
+        try {
+            await process_and_store_chunk(chunk);
+            stored++;
+        } catch (e) {
+            error(`Failed to store chunk:`, e);
+        }
+    }
+    
+    toastr.success(`Indexed ${indexed} messages into ${stored} chunks`, MODULE_NAME_FANCY);
+    debug(`Indexed ${indexed} messages into ${stored} chunks`);
+}
+
+// ==================== MEMORY RETRIEVAL AND INJECTION ====================
+
+// Retrieve relevant memories for current context
+async function retrieve_relevant_memories() {
+    if (!get_settings('qdrant_enabled')) {
+        return [];
+    }
+    
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!chat || chat.length === 0) {
+        return [];
+    }
+    
+    // Build query from recent messages
+    const retainRecent = get_settings('retain_recent_messages');
+    const queryMessages = [];
+    
+    for (let i = Math.max(0, chat.length - retainRecent); i < chat.length; i++) {
+        const message = chat[i];
+        if (!message.is_system && message.mes) {
+            queryMessages.push(message.mes);
+        }
+    }
+    
+    if (queryMessages.length === 0) {
+        return [];
+    }
+    
+    const queryText = queryMessages.join('\n\n');
+    
+    try {
+        const memories = await search_memories(queryText);
+        
+        // Filter out memories that overlap with recent messages
+        const filteredMemories = memories.filter(m => {
+            // Exclude if any of the memory's messages are in recent context
+            const newestMessageIndex = chat.length - 1;
+            const oldestRecentIndex = newestMessageIndex - retainRecent;
+            
+            // Memory's last message should be older than our recent window
+            return m.lastIndex < oldestRecentIndex;
+        });
+        
+        debug(`Retrieved ${filteredMemories.length} relevant memories (filtered from ${memories.length})`);
+        return filteredMemories;
+        
+    } catch (e) {
+        error('Failed to retrieve memories:', e);
+        return [];
+    }
+}
+
+// Format memories for injection
+function format_memories_for_injection(memories) {
+    if (!memories || memories.length === 0) {
+        return '';
+    }
+    
+    const formattedMemories = memories.map((m, i) => {
+        return `[Memory ${i + 1} (relevance: ${(m.score * 100).toFixed(1)}%)]\n${m.text}`;
+    }).join('\n\n');
+    
+    return `[Retrieved Long-Term Memories]
+The following are semantically relevant memories from earlier in this conversation.
+Use them to maintain continuity but prefer recent context if there are contradictions.
+
+${formattedMemories}
+
+[/Retrieved Long-Term Memories]`;
+}
+
+// Global variable to store retrieved memories for current generation
+let CURRENT_QDRANT_MEMORIES = [];
+let CURRENT_QDRANT_INJECTION = '';
+
+// Refresh Qdrant memories (called before generation)
+async function refresh_qdrant_memories() {
+    if (!get_settings('qdrant_enabled')) {
+        CURRENT_QDRANT_MEMORIES = [];
+        CURRENT_QDRANT_INJECTION = '';
+        return;
+    }
+    
+    try {
+        CURRENT_QDRANT_MEMORIES = await retrieve_relevant_memories();
+        CURRENT_QDRANT_INJECTION = format_memories_for_injection(CURRENT_QDRANT_MEMORIES);
+        
+        // Inject memories into context
+        const ctx = getContext();
+        const position = get_settings('memory_position');
+        
+        ctx.setExtensionPrompt(
+            `${MODULE_NAME}_qdrant_memories`,
+            CURRENT_QDRANT_INJECTION,
+            extension_prompt_types.IN_CHAT,
+            position,
+            false,
+            extension_prompt_roles.SYSTEM
+        );
+        
+        debug(`Injected ${CURRENT_QDRANT_MEMORIES.length} Qdrant memories`);
+        
+    } catch (e) {
+        error('Failed to refresh Qdrant memories:', e);
+        CURRENT_QDRANT_MEMORIES = [];
+        CURRENT_QDRANT_INJECTION = '';
+    }
+}
+
+// Get token count of current Qdrant injection (for synergy token accounting)
+function get_qdrant_injection_tokens() {
+    if (!CURRENT_QDRANT_INJECTION) {
+        return 0;
+    }
+    return count_tokens(CURRENT_QDRANT_INJECTION);
 }
 
 // Load settings HTML

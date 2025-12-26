@@ -3,7 +3,132 @@
     margin: 1em 0;
 }
 
-/* Status panel styling */
+/* ==================== TAB NAVIGATION ==================== */
+.ct_tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 15px;
+    border-bottom: 2px solid var(--SmartThemeBorderColor);
+    padding-bottom: 0;
+}
+
+.ct_tab {
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    background: var(--black30a);
+    color: var(--SmartThemeBodyColor);
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: -2px;
+}
+
+.ct_tab:hover {
+    background: var(--black50a);
+}
+
+.ct_tab_active {
+    background: var(--SmartThemeBlurTintColor);
+    border-color: var(--SmartThemeBorderColor);
+    color: var(--SmartThemeBodyColor);
+    font-weight: bold;
+}
+
+.ct_tab i {
+    font-size: 0.9em;
+    opacity: 0.8;
+}
+
+.ct_tab_active i {
+    opacity: 1;
+}
+
+/* ==================== TAB CONTENT ==================== */
+.ct_tab_content {
+    display: none;
+    animation: ct_fadeIn 0.2s ease;
+}
+
+.ct_tab_content_active {
+    display: block;
+}
+
+@keyframes ct_fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ==================== STATUS MESSAGES ==================== */
+.ct_status_message {
+    padding: 8px 12px;
+    border-radius: 5px;
+    font-size: 0.9em;
+    min-height: 20px;
+}
+
+.ct_status_success {
+    background: rgba(76, 175, 80, 0.2);
+    border: 1px solid rgba(76, 175, 80, 0.5);
+    color: #90ee90;
+}
+
+.ct_status_error {
+    background: rgba(244, 67, 54, 0.2);
+    border: 1px solid rgba(244, 67, 54, 0.5);
+    color: #ffaaaa;
+}
+
+.ct_status_warning {
+    background: rgba(255, 193, 7, 0.2);
+    border: 1px solid rgba(255, 193, 7, 0.5);
+    color: #ffff99;
+}
+
+.ct_status_info {
+    background: rgba(33, 150, 243, 0.2);
+    border: 1px solid rgba(33, 150, 243, 0.5);
+    color: #90caf9;
+}
+
+/* ==================== INFO BOX ==================== */
+.ct_info_box {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    background: rgba(33, 150, 243, 0.1);
+    border: 1px solid rgba(33, 150, 243, 0.3);
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.ct_info_box i {
+    color: #90caf9;
+    font-size: 1.1em;
+    margin-top: 2px;
+}
+
+.ct_info_box span {
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+/* ==================== DANGER BUTTON ==================== */
+.menu_button_danger {
+    background: rgba(244, 67, 54, 0.2) !important;
+    border-color: rgba(244, 67, 54, 0.5) !important;
+}
+
+.menu_button_danger:hover {
+    background: rgba(244, 67, 54, 0.4) !important;
+}
+
+/* ==================== STATUS PANEL ==================== */
 .ct_status_panel {
     background-color: var(--black30a);
     border-radius: 5px;
@@ -34,17 +159,60 @@
     border-bottom: none;
 }
 
-/* Inline settings */
+/* ==================== INLINE SETTINGS ==================== */
 #context_truncator_settings .inline_setting {
     width: 6em;
 }
 
-/* Button styling */
+/* ==================== BUTTON STYLING ==================== */
 #context_truncator_settings .menu_button i {
     margin-right: 0.5em;
 }
 
-/* Horizontal rules */
+/* ==================== HORIZONTAL RULES ==================== */
 #context_truncator_settings hr {
     margin: 1em 0;
+    border-color: var(--SmartThemeBorderColor);
+    opacity: 0.3;
+}
+
+/* ==================== RANGE INPUTS ==================== */
+#context_truncator_settings input[type="range"] {
+    width: 100%;
+    margin-top: 5px;
+}
+
+/* ==================== QDRANT SPECIFIC ==================== */
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] h4,
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] .flex-container:not(:first-child) {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] .flex-container:first-child {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Connection status indicator */
+.ct_connection_indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+}
+
+.ct_connection_indicator.connected {
+    background: #4caf50;
+    box-shadow: 0 0 5px #4caf50;
+}
+
+.ct_connection_indicator.disconnected {
+    background: #f44336;
+    box-shadow: 0 0 5px #f44336;
+}
+
+.ct_connection_indicator.unknown {
+    background: #9e9e9e;
 }
