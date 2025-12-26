@@ -689,6 +689,7 @@ function update_status_display() {
     const difference = actualSize - targetSize;
     const percentError = Math.abs((difference / targetSize) * 100);
     
+<<<<<<< Updated upstream
     // Diagnostic logging: compare prediction with actual
     if (get_settings('debug') && LAST_PREDICTED_SIZE > 0) {
         debug('=== PREDICTION vs ACTUAL ANALYSIS ===');
@@ -709,6 +710,8 @@ function update_status_display() {
         debug(`  Non-chat difference: ${LAST_PREDICTED_NON_CHAT_SIZE - actualNonChatTokens} tokens`);
     }
     
+=======
+>>>>>>> Stashed changes
     // Diagnostic logging: analyze itemizedPrompts
     const itemized = ctx.getLastItemizedPrompts();
     if (itemized && get_settings('debug')) {
