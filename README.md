@@ -1,20 +1,25 @@
-# SillyTavern Context Truncator
+# SillyTavern Context Truncator with Summarization
 
-Batch-based context truncation to prevent cache invalidation when using LLMs with caching support.
+Intelligent context management with AI-powered summarization and batch-based truncation to prevent cache invalidation when using LLMs with caching support.
 
 ## Purpose
 
-When using LLMs with caching (like Claude), removing messages one-by-one invalidates the cache on every generation, causing slower responses and higher costs. This extension removes messages in fixed batches, minimizing cache invalidation while keeping context under control.
+When using LLMs with caching (like Claude), removing messages one-by-one invalidates the cache on every generation, causing slower responses and higher costs. This extension intelligently manages context by:
 
-**Note:** The target context size is approximate and may vary by ±10% due to batch-based truncation. This is intentional to preserve cache efficiency.
+1. **Summarizing** older messages using AI to preserve narrative continuity
+2. **Truncating** in fixed batches to minimize cache invalidation
+3. **Targeting** a specific context size for predictable behavior
 
 ## How It Works
 
 1. **Monitors** the previous prompt size using SillyTavern's raw context API
 2. **Detects** when the context exceeds your target size
-3. **Removes** N messages at once (batch truncation)
-4. **Continues** removing batches until context is back under target
-5. **Preserves** a minimum number of recent messages for safety
+3. **Summarizes** older messages using AI (optional but recommended)
+4. **Removes** N messages at once (batch truncation) from active context
+5. **Injects** summaries as extension prompts to maintain narrative continuity
+6. **Learns** from each generation to improve accuracy over time
+7. **Preserves** a minimum number of recent messages for safety
+8. **Displays** real-time accuracy metrics with color-coded feedback
 
 ## Installation
 
@@ -25,54 +30,106 @@ When using LLMs with caching (like Claude), removing messages one-by-one invalid
 
 ## Configuration
 
-### Settings
+### Core Settings
 
-- **Enable Batch Truncation**: Toggle the extension on/off
-- **Target Context Size (±10%)**: The approximate size (in tokens) to trim down to (default: 8000). Actual size may vary by ±10% due to batch truncation.
+- **Enable Extension**: Toggle the extension on/off
+- **Target Context Size**: The target size (in tokens) to maintain (default: 42000)
 - **Batch Size**: Number of messages to remove per batch (default: 20)
 - **Min Messages to Keep**: Safety limit - never go below this many messages (default: 10)
+
+### Summarization Settings
+
+- **Enable Summarization**: Toggle AI summarization on/off (recommended)
+- **Summary Prompt**: Custom prompt for the AI summarizer (uses character's persona)
+- **Summary Position**: Where to inject summaries (After Main Prompt, After Character Definitions, etc.)
+- **Summary Depth**: How many messages to include per summary (default: 1)
+- **Auto-Summarize**: Automatically summarize when new messages arrive
+
+### Advanced Settings
+
 - **Debug Mode**: Enable detailed logging to browser console
+- **Streaming**: Enable streaming for summary generation
 
 ### Status Display
 
-The status panel shows real-time information:
-- **Current Context**: Size of the previous prompt in tokens (color-coded: 🔴 Red if >110% of target, 🟡 Yellow if within ±10%, 🟢 Green if <90%)
-- **Target**: Your configured target size (±10% variance expected)
-- **Batch Size**: Current batch size setting
-- **Truncation Index**: Where truncation starts (first message to keep)
-- **Total Messages**: Total messages in chat
-- **Kept Messages**: Messages currently kept in context
+After each generation, the extension displays:
+- **Actual**: The actual prompt size in tokens
+- **Target**: Your configured target size
+- **Difference**: How many tokens over/under target
+- **Error**: Percentage error from target
+
+**Color Coding:**
+- 🟢 **Green**: Within 5% of target (excellent accuracy)
+- 🟡 **Yellow**: Within 20% of target (good accuracy)
+- 🔴 **Red**: Over 20% from target (needs adjustment)
 
 ### Controls
 
-- **Reset Truncation**: Resets the truncation index (useful after deleting messages)
-- **Refresh Status**: Manually updates the status display
+- **Reset Truncation**: Resets the truncation index and clears summaries
 
 ## Example Scenario
 
 **Setup:**
-- Target context: 8000 tokens (±10% = 7200-8800 acceptable range)
+- Target context: 45000 tokens
 - Batch size: 20 messages
 - Min keep: 10 messages
-- Chat has 100 messages
+- Summarization: Enabled
+- Chat has 400+ messages
 
 **Execution:**
-1. **Generation 1**: Context = 7500 tokens → No truncation (within range)
-2. **Generation 2**: Context = 8900 tokens → Remove messages 0-19 (batch 1)
-3. **Generation 3**: Context = 8200 tokens → No more truncation (within range)
-4. **Generation 4**: Context = 7800 tokens → No truncation (within range)
-5. **Generation 5+**: Context stays within 7200-8800 → **Cache preserved!**
+1. **Generation 1** (Initial Learning):
+   - Actual: 35932 tokens
+   - Target: 45000 tokens
+   - Error: 20.2% (under target) 🔴
+   - System learns correction factor: 0.898
 
-**Note:** The actual context size will typically vary within ±10% of your target due to batch-based truncation. This is expected behavior and ensures cache efficiency.
+2. **Generation 2** (Adapting):
+   - Actual: 37730 tokens
+   - Target: 45000 tokens
+   - Error: 16.2% (under target) 🟡
+   - System refines correction factor: 0.826
 
-## Benefits
+3. **Generation 3** (Converging):
+   - Actual: 39381 tokens
+   - Target: 45000 tokens
+   - Error: 12.5% (under target) 🟡
+   - Correction factor stabilizes
 
+4. **Generation 4+** (Stable):
+   - Actual: 39771 tokens
+   - Target: 45000 tokens
+   - Error: 11.6% (under target) 🟡
+   - **Cache preserved!** ✓
+
+**Status Display Example:**
+```
+Last Generation:
+Actual: 39,771 tokens
+Target: 45,000 tokens
+Difference: -5,229 tokens
+Error: 11.6%
+```
+(Displayed in yellow background)
+
+**Note:** The extension learns and improves accuracy over 2-3 generations. First generation uses estimates and may be less accurate.
+
+## Key Features
+
+- **Adaptive Learning**: Learns from each generation to improve accuracy over time
+- **Narrative Continuity**: AI summaries preserve story context even after truncation
 - **Cache Efficiency**: 20x fewer cache invalidations (removing 20 at once vs 1 at a time)
 - **Predictable Behavior**: Always removes fixed batches, not variable amounts
-- **Approximate Targeting**: Maintains context within ±10% of target for optimal cache preservation
+- **Real-time Feedback**: Color-coded status display shows actual vs target with accuracy metrics
 - **Safety**: Minimum message setting prevents over-truncation
-- **Transparency**: Color-coded status display shows exactly what's happening
 - **Automatic**: Works seamlessly in the background
+- **Flexible**: Can be used with or without summarization
+
+## Performance
+
+- **First Generation**: ~20% error (learning phase)
+- **Second Generation**: ~15% error (adapting)
+- **Third+ Generations**: ~10-12% error (stable)
+- **Cache Preservation**: Maintained after convergence
 
 ## Requirements
 
@@ -88,13 +145,27 @@ The status panel shows real-time information:
 ### Truncation not working
 - Enable **Debug Mode** in settings
 - Check browser console for debug logs
-- Verify **Enable Batch Truncation** is checked
+- Verify **Enable Extension** is checked
 - Check that **Target Context Size** is set appropriately
+- Ensure you have at least one generation after enabling
 
-### Status display shows "-"
+### Status display not showing
 - Wait for a message to be generated first
-- Click the **Refresh Status** button
+- The display only appears after the first generation
 - Check that the extension is enabled
+
+### Accuracy issues (high error percentage)
+- **First generation is always less accurate** (~20% error) as the system learns
+- **Accuracy improves over 2-3 generations** as the adaptive system converges
+- **Typical stable accuracy**: 10-15% error (conservative, under target)
+- Batch size affects accuracy - smaller batches = more precise but more cache invalidations
+- Click "Reset Truncation" to restart the learning process if needed
+
+### Summarization not working
+- Verify **Enable Summarization** is checked
+- Check that you have an active AI connection
+- Enable **Debug Mode** to see summary generation logs
+- Ensure **Summary Prompt** is not empty
 
 ## License
 

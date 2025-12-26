@@ -171,6 +171,95 @@ function get_previous_prompt_size() {
     return size;
 }
 
+// Parse raw prompt into chat segments with token counts
+function get_prompt_chat_segments_from_raw(raw_prompt) {
+    if (!raw_prompt) {
+        debug('  get_prompt_chat_segments_from_raw: No raw prompt');
+        return null;
+    }
+    
+    // Match Llama 3 style headers: <|eot_id|><|start_header_id|>role<|end_header_id|>
+    const header_regex = /<\|eot_id\|><\|start_header_id\|>(user|assistant|system)<\|end_header_id\|>/g;
+    let matches = [];
+    let match;
+    
+    while ((match = header_regex.exec(raw_prompt)) !== null) {
+        matches.push({
+            index: match.index,
+            role: match[1],
+        });
+    }
+    
+    debug(`  get_prompt_chat_segments_from_raw: Found ${matches.length} header matches`);
+    
+    if (matches.length === 0) {
+        debug('  get_prompt_chat_segments_from_raw: No headers found, might not be Llama 3 format');
+        return null;
+    }
+    
+    let segments = [];
+    for (let i = 0; i < matches.length; i++) {
+        let current = matches[i];
+        let next = matches[i + 1];
+        
+        // Only count user and assistant messages (skip system)
+        if (current.role !== 'user' && current.role !== 'assistant') {
+            continue;
+        }
+        
+        let end_index = next ? next.index : raw_prompt.length;
+        let segment = raw_prompt.slice(current.index, end_index);
+        
+        segments.push({
+            role: current.role,
+            tokenCount: count_tokens(segment),
+        });
+    }
+    
+    return segments;
+}
+
+// Build a map of message index to actual token count in prompt
+function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
+    let segments = get_prompt_chat_segments_from_raw(raw_prompt);
+    if (!segments) {
+        debug('  get_prompt_message_tokens_from_raw: No segments found');
+        return null;
+    }
+    
+    debug(`  get_prompt_message_tokens_from_raw: Found ${segments.length} segments`);
+    
+    let map = new Map();
+    let segment_index = 0;
+    
+    // Match segments to chat messages
+    for (let i = 0; i < chat.length && segment_index < segments.length; i++) {
+        let message = chat[i];
+        
+        // Skip system messages
+        if (message.is_system) {
+            continue;
+        }
+        
+        let expected_role = message.is_user ? 'user' : 'assistant';
+        
+        // Find next matching segment
+        while (segment_index < segments.length && segments[segment_index].role !== expected_role) {
+            segment_index += 1;
+        }
+        
+        if (segment_index >= segments.length) {
+            break;
+        }
+        
+        map.set(i, segments[segment_index].tokenCount);
+        segment_index += 1;
+    }
+    
+    debug(`  get_prompt_message_tokens_from_raw: Built map with ${map.size} entries`);
+    return map;
+}
+
 // Truncation index management
 function load_truncation_index() {
     debug(`Loading truncation index from metadata`);
@@ -188,13 +277,15 @@ function save_truncation_index() {
     }
     chat_metadata[MODULE_NAME].truncation_index = TRUNCATION_INDEX;
     chat_metadata[MODULE_NAME].target_size = get_settings('target_context_size');
-    debug(`Saved truncation index: ${TRUNCATION_INDEX}`);
+    chat_metadata[MODULE_NAME].correction_factor = CHAT_TOKEN_CORRECTION_FACTOR;
+    debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
     saveMetadataDebounced();
 }
 
 function reset_truncation_index() {
     debug('Resetting truncation index');
     TRUNCATION_INDEX = null;
+    CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Reset correction factor
     save_truncation_index();
 }
 
@@ -206,6 +297,17 @@ function should_recalculate_truncation() {
     if (savedTargetSize !== undefined && savedTargetSize !== currentTargetSize) {
         debug(`Target size changed from ${savedTargetSize} to ${currentTargetSize}, forcing recalculation`);
         return true;
+    }
+    
+    // Recalculate if correction factor changed significantly (more than 5%)
+    const savedCorrectionFactor = chat_metadata?.[MODULE_NAME]?.correction_factor;
+    if (savedCorrectionFactor !== undefined) {
+        const factorChange = Math.abs(CHAT_TOKEN_CORRECTION_FACTOR - savedCorrectionFactor);
+        const percentChange = (factorChange / savedCorrectionFactor) * 100;
+        if (percentChange > 5) {
+            debug(`Correction factor changed by ${percentChange.toFixed(1)}% (${savedCorrectionFactor.toFixed(3)} → ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}), forcing recalculation`);
+            return true;
+        }
     }
     
     return false;
@@ -254,51 +356,54 @@ function calculate_truncation_index() {
         assistant: count_tokens(PROMPT_HEADER_ASSISTANT),
     };
     
-    // Get chat tokens from itemizedPrompts (only from the LAST generation)
-    // itemizedPrompts contains all generations, we need to find the ones for the last message
-    const lastMessageId = chat.length - 1;
+    // Build message token map from last prompt for accurate estimation
+    let last_raw_prompt = get_last_prompt_raw();
+    let message_token_map = get_prompt_message_tokens_from_raw(last_raw_prompt, chat);
+    
+    // Calculate non-chat budget from the current raw prompt
+    // Both total and chat tokens must come from the SAME prompt for accuracy
+    let totalPromptTokens;
     let promptChatTokens = 0;
-    let itemizedCount = 0;
+    let nonChatBudget;
     
-    // Find itemizedPrompts for the last message
-    for (let i = itemizedPrompts.length - 1; i >= 0; i--) {
-        let itemizedPrompt = itemizedPrompts[i];
-        if (itemizedPrompt?.mesId === lastMessageId) {
-            // Found an itemized prompt for the last message
-            let tokenCount = itemizedPrompt?.tokenCount;
-            if (tokenCount === undefined) {
-                let rawPrompt = itemizedPrompt?.rawPrompt;
-                if (Array.isArray(rawPrompt)) rawPrompt = rawPrompt.map(x => x.content).join('\n');
-                tokenCount = count_tokens(rawPrompt ?? '');
-            }
-            promptChatTokens += tokenCount;
-            itemizedCount++;
-        } else if (itemizedPrompt?.mesId < lastMessageId) {
-            // We've gone past the last message, stop
-            break;
+    if (!last_raw_prompt) {
+        // No raw prompt - estimate non-chat budget as 15% of current prompt size
+        // This is a rough estimate for the first generation only
+        nonChatBudget = Math.floor(currentPromptSize * 0.15);
+        debug(`  No raw prompt available - using 15% estimate for non-chat budget: ${nonChatBudget}`);
+    } else {
+        // Have raw prompt - calculate accurately
+        totalPromptTokens = count_tokens(last_raw_prompt);
+        
+        let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+        if (segments && segments.length > 0) {
+            promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
         }
+        
+        nonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
+        
+        debug(`  Total prompt tokens: ${totalPromptTokens}`);
+        debug(`  Prompt chat tokens: ${promptChatTokens}`);
+        debug(`  Non-chat budget: ${nonChatBudget}`);
     }
     
-    debug(`  Found ${itemizedCount} itemizedPrompts for message ${lastMessageId}`);
-    
-    // If we didn't find any itemizedPrompts, fall back to counting all messages
-    if (promptChatTokens === 0) {
-        debug('  No itemizedPrompts found for last message, counting all messages');
-        for (let i = 0; i < chat.length; i++) {
-            if (!chat[i].is_system) {
-                promptChatTokens += count_tokens(chat[i].mes);
-            }
-        }
-    }
-    
-    // Calculate non-chat budget (system prompts, character card, etc.)
-    const nonChatBudget = Math.max(currentPromptSize - promptChatTokens, 0);
-    
-    debug(`  Prompt chat tokens: ${promptChatTokens}`);
-    debug(`  Non-chat budget: ${nonChatBudget}`);
+    // Track token map usage
+    let map_hits = 0;
+    let map_misses = 0;
     
     // Function to estimate message tokens in prompt
     function estimateMessagePromptTokens(message, index) {
+        // Try to use actual token count from map first
+        if (message_token_map) {
+            let mapped = message_token_map.get(index);
+            if (mapped !== undefined) {
+                map_hits++;
+                return mapped;
+            }
+        }
+        
+        // Fall back to estimation
+        map_misses++;
         const roleHeaderTokens = message.is_user ? promptHeaderTokens.user : promptHeaderTokens.assistant;
         return count_tokens(message.mes) + roleHeaderTokens;
     }
@@ -312,14 +417,17 @@ function calculate_truncation_index() {
             // Skip system messages
             if (message.is_system) continue;
             
+            // Messages before startIndex are excluded (lagging)
             // Messages at or after startIndex are kept in full
-            const kept = i >= startIndex;
-            if (kept) {
-                total += estimateMessagePromptTokens(message, i);
+            const lagging = i < startIndex;
+            if (!lagging) {
+                // Kept message - use full token count with correction factor
+                const rawEstimate = estimateMessagePromptTokens(message, i);
+                total += Math.floor(rawEstimate * CHAT_TOKEN_CORRECTION_FACTOR);
                 continue;
             }
             
-            // Messages before startIndex are replaced with summaries (if they have one)
+            // Excluded message - use summary if available
             const summary = get_memory(message);
             if (summary && check_message_exclusion(message)) {
                 total += count_tokens(summary) + sepSize;
@@ -371,9 +479,18 @@ function calculate_truncation_index() {
     
     const finalIndex = Math.max(nextIndex, currentIndex);
     
+    const predictedChatSize = estimateChatSize(finalIndex);
+    const predictedTotal = predictedChatSize + nonChatBudget;
+    
     debug(`  Final truncation index: ${finalIndex}`);
-    debug(`  Final chat size: ${estimateChatSize(finalIndex)}`);
-    debug(`  Final total: ${estimateChatSize(finalIndex) + nonChatBudget}`);
+    debug(`  Final chat size: ${predictedChatSize}`);
+    debug(`  Final total: ${predictedTotal}`);
+    debug(`  Token map: ${map_hits} hits, ${map_misses} misses (${message_token_map ? message_token_map.size : 0} entries)`);
+    
+    // Store predictions for comparison with actual results
+    LAST_PREDICTED_SIZE = predictedTotal;
+    LAST_PREDICTED_CHAT_SIZE = predictedChatSize;
+    LAST_PREDICTED_NON_CHAT_SIZE = nonChatBudget;
     
     return finalIndex;
 }
@@ -427,14 +544,14 @@ function update_message_inclusion_flags() {
     debug(`Truncation index: ${TRUNCATION_INDEX}`);
     
     // Mark messages as lagging (excluded) or not
-    // lagging = true means the message is AT OR AFTER the threshold (kept in context)
-    // lagging = false means the message is BEFORE the threshold (excluded from context)
+    // lagging = true means the message is BEFORE the threshold (excluded from context, "lagging behind")
+    // lagging = false means the message is AT OR AFTER the threshold (kept in context)
     for (let i = 0; i < chat.length; i++) {
-        const lagging = i >= TRUNCATION_INDEX;
+        const lagging = i < TRUNCATION_INDEX;
         set_data(chat[i], 'lagging', lagging);
         
-        // If NOT lagging (excluded) and has no summary, mark for summarization
-        if (!lagging && !get_memory(chat[i]) && !chat[i].is_system) {
+        // If lagging (excluded) and has no summary, mark for summarization
+        if (lagging && !get_memory(chat[i]) && !chat[i].is_system) {
             set_data(chat[i], 'needs_summary', true);
         }
     }
@@ -521,6 +638,13 @@ function refresh_memory() {
 
 // Global variable to store context size from intercept
 let CURRENT_CONTEXT_SIZE = 0;
+let LAST_ACTUAL_PROMPT_SIZE = 0;
+let LAST_PREDICTED_SIZE = 0;
+let LAST_PREDICTED_CHAT_SIZE = 0;
+let LAST_PREDICTED_NON_CHAT_SIZE = 0;
+
+// Adaptive correction factor (learned from previous generations)
+let CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Multiplier for chat token estimates
 
 // Message interception hook (called by SillyTavern before generation)
 globalThis.truncator_intercept_messages = function (chat, contextSize, abort, type) {
@@ -542,6 +666,8 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     let IGNORE_SYMBOL = getContext().symbols.ignore;
     
     // Mark messages with IGNORE_SYMBOL based on lagging flag
+    // lagging = true means excluded (IGNORE_SYMBOL = true)
+    // lagging = false means kept (IGNORE_SYMBOL = false)
     let kept_count = 0;
     let excluded_count = 0;
     for (let i = start; i >= 0; i--) {
@@ -551,9 +677,9 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
         let lagging = get_data(message, 'lagging');
         
         chat[i] = structuredClone(chat[i]);
-        chat[i].extra[IGNORE_SYMBOL] = !lagging;
+        chat[i].extra[IGNORE_SYMBOL] = lagging;
         
-        if (!lagging) {
+        if (lagging) {
             excluded_count++;
         } else {
             kept_count++;
@@ -562,6 +688,93 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
     
     debug(`Applied IGNORE_SYMBOL: ${kept_count} kept, ${excluded_count} excluded`);
 };
+
+// Update status display after generation
+function update_status_display() {
+    debug('update_status_display called');
+    const $display = $('#ct_status_display');
+    const $text = $('#ct_status_text');
+    
+    debug(`  $display found: ${$display.length > 0}`);
+    debug(`  $text found: ${$text.length > 0}`);
+    
+    // Get the last prompt size
+    const last_raw_prompt = get_last_prompt_raw();
+    debug(`  last_raw_prompt exists: ${!!last_raw_prompt}`);
+    if (!last_raw_prompt) {
+        $display.hide();
+        debug('  No raw prompt, hiding display');
+        return;
+    }
+    
+    const actualSize = count_tokens(last_raw_prompt);
+    const targetSize = get_settings('target_context_size');
+    const difference = actualSize - targetSize;
+    const percentError = Math.abs((difference / targetSize) * 100);
+    
+    // Calculate and apply adaptive correction factor
+    if (LAST_PREDICTED_SIZE > 0 && LAST_PREDICTED_CHAT_SIZE > 0) {
+        // Analyze actual chat vs non-chat from current prompt
+        const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+        const actualChatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
+        const actualNonChatTokens = actualSize - actualChatTokens;
+        
+        // Calculate correction factor: actual / predicted
+        const newCorrectionFactor = actualChatTokens / LAST_PREDICTED_CHAT_SIZE;
+        
+        // Smooth the correction factor (exponential moving average with alpha=0.3)
+        // This prevents wild swings from a single bad estimate
+        CHAT_TOKEN_CORRECTION_FACTOR = (0.3 * newCorrectionFactor) + (0.7 * CHAT_TOKEN_CORRECTION_FACTOR);
+        
+        if (get_settings('debug_mode')) {
+            debug('=== PREDICTION vs ACTUAL ANALYSIS ===');
+            debug(`  PREDICTED total: ${LAST_PREDICTED_SIZE} tokens`);
+            debug(`  PREDICTED chat: ${LAST_PREDICTED_CHAT_SIZE} tokens`);
+            debug(`  PREDICTED non-chat: ${LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
+            debug(`  ACTUAL total: ${actualSize} tokens`);
+            debug(`  DIFFERENCE: ${LAST_PREDICTED_SIZE - actualSize} tokens (${((LAST_PREDICTED_SIZE - actualSize) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
+            debug(`  ACTUAL chat: ${actualChatTokens} tokens`);
+            debug(`  ACTUAL non-chat: ${actualNonChatTokens} tokens`);
+            debug(`  Chat difference: ${LAST_PREDICTED_CHAT_SIZE - actualChatTokens} tokens`);
+            debug(`  Non-chat difference: ${LAST_PREDICTED_NON_CHAT_SIZE - actualNonChatTokens} tokens`);
+            debug(`  New correction factor: ${newCorrectionFactor.toFixed(3)}`);
+            debug(`  Smoothed correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
+        }
+    }
+    
+    // Determine color based on error percentage
+    let bgColor, textColor;
+    if (percentError <= 5) {
+        bgColor = '#2d5016'; // dark green
+        textColor = '#90ee90'; // light green
+    } else if (percentError <= 20) {
+        bgColor = '#4a4a00'; // dark yellow
+        textColor = '#ffff99'; // light yellow
+    } else {
+        bgColor = '#4a0000'; // dark red
+        textColor = '#ffaaaa'; // light red
+    }
+    
+    $display.css({
+        'background-color': bgColor,
+        'color': textColor
+    });
+    
+    const statusText = `
+        <div>Actual: <b>${actualSize.toLocaleString()}</b> tokens</div>
+        <div>Target: <b>${targetSize.toLocaleString()}</b> tokens</div>
+        <div>Difference: <b>${difference > 0 ? '+' : ''}${difference.toLocaleString()}</b> tokens</div>
+        <div>Error: <b>${percentError.toFixed(1)}%</b></div>
+    `;
+    
+    debug(`  Setting status text and showing display`);
+    debug(`  Status text: ${statusText.substring(0, 100)}...`);
+    $text.html(statusText);
+    $display.show();
+    debug(`  Display shown, visibility: ${$display.css('display')}`);
+    
+    LAST_ACTUAL_PROMPT_SIZE = actualSize;
+}
 
 // Summarization functionality
 class SummaryQueue {
@@ -686,6 +899,7 @@ function register_event_listeners() {
         if (currentChatId !== null && currentChatId !== newChatId) {
             debug('Chat switched, loading truncation index');
             TRUNCATION_INDEX = null;
+            CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Reset correction factor for new chat
             load_truncation_index();
         }
         currentChatId = newChatId;
@@ -702,10 +916,14 @@ function register_event_listeners() {
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, async (id) => {
         if (streamingProcessor && !streamingProcessor.isFinished) return;
         await auto_summarize_chat();
+        // Delay status update to ensure itemizedPrompts is populated
+        setTimeout(() => update_status_display(), 100);
     });
-    
+
     eventSource.on(event_types.USER_MESSAGE_RENDERED, async (id) => {
         await auto_summarize_chat();
+        // Delay status update to ensure itemizedPrompts is populated
+        setTimeout(() => update_status_display(), 100);
     });
 }
 
