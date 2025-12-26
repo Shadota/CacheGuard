@@ -277,7 +277,8 @@ function save_truncation_index() {
     }
     chat_metadata[MODULE_NAME].truncation_index = TRUNCATION_INDEX;
     chat_metadata[MODULE_NAME].target_size = get_settings('target_context_size');
-    debug(`Saved truncation index: ${TRUNCATION_INDEX}`);
+    chat_metadata[MODULE_NAME].correction_factor = CHAT_TOKEN_CORRECTION_FACTOR;
+    debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
     saveMetadataDebounced();
 }
 
@@ -296,6 +297,17 @@ function should_recalculate_truncation() {
     if (savedTargetSize !== undefined && savedTargetSize !== currentTargetSize) {
         debug(`Target size changed from ${savedTargetSize} to ${currentTargetSize}, forcing recalculation`);
         return true;
+    }
+    
+    // Recalculate if correction factor changed significantly (more than 5%)
+    const savedCorrectionFactor = chat_metadata?.[MODULE_NAME]?.correction_factor;
+    if (savedCorrectionFactor !== undefined) {
+        const factorChange = Math.abs(CHAT_TOKEN_CORRECTION_FACTOR - savedCorrectionFactor);
+        const percentChange = (factorChange / savedCorrectionFactor) * 100;
+        if (percentChange > 5) {
+            debug(`Correction factor changed by ${percentChange.toFixed(1)}% (${savedCorrectionFactor.toFixed(3)} → ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}), forcing recalculation`);
+            return true;
+        }
     }
     
     return false;
