@@ -57,6 +57,22 @@
             </div>
 
             <div class="flex-container flexFlowColumn">
+                <label for="ct_connection_profile">
+                    <span>Connection Profile</span>
+                </label>
+                <select id="ct_connection_profile" class="text_pole"></select>
+                <small>Choose a different model for summarization. "Same as Current" uses your main model. Allows background summarization while roleplaying.</small>
+            </div>
+
+            <div class="flex-container flexFlowColumn">
+                <label for="ct_max_words">
+                    <span>Maximum Words per Summary</span>
+                </label>
+                <input id="ct_max_words" class="text_pole" type="number" min="10" max="200" step="5" />
+                <small>Maximum number of words allowed in each summary (default: 50)</small>
+            </div>
+
+            <div class="flex-container flexFlowColumn">
                 <button id="ct_summarize_all" class="menu_button">
                     <i class="fa-solid fa-compress"></i>
                     <span>Summarize All Messages</span>

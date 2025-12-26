@@ -40,6 +40,11 @@ When using LLMs with caching (like Claude), removing messages one-by-one invalid
 ### Summarization Settings
 
 - **Enable Summarization**: Toggle AI summarization on/off (recommended)
+- **Connection Profile**: Choose a different model for summarization (optional)
+  - Select "Same as Current" to use your main model
+  - Select a different profile to enable **background summarization** while roleplaying
+  - Allows using a faster/cheaper model for summaries while using a premium model for roleplay
+- **Maximum Words per Summary**: Word limit for each summary (default: 50)
 - **Summary Prompt**: Custom prompt for the AI summarizer (uses character's persona)
 - **Summary Position**: Where to inject summaries (After Main Prompt, After Character Definitions, etc.)
 - **Summary Depth**: How many messages to include per summary (default: 1)
@@ -117,12 +122,32 @@ Error: 11.6%
 
 - **Adaptive Learning**: Learns from each generation to improve accuracy over time
 - **Narrative Continuity**: AI summaries preserve story context even after truncation
+- **Background Summarization**: Use a different model for summaries while roleplaying
 - **Cache Efficiency**: 20x fewer cache invalidations (removing 20 at once vs 1 at a time)
 - **Predictable Behavior**: Always removes fixed batches, not variable amounts
 - **Real-time Feedback**: Color-coded status display shows actual vs target with accuracy metrics
 - **Safety**: Minimum message setting prevents over-truncation
 - **Automatic**: Works seamlessly in the background
 - **Flexible**: Can be used with or without summarization
+
+## Background Summarization
+
+The extension supports using a different model for summarization than your main roleplay model. This enables:
+
+- **Cost Optimization**: Use a cheaper model (e.g., GPT-4o-mini) for summaries while using a premium model (e.g., Claude Opus) for roleplay
+- **Speed**: Use a faster model for summaries to reduce wait time
+- **Independence**: Summarize in the background without interrupting your main conversation
+
+**How to use:**
+1. Set up multiple connection profiles in SillyTavern's Connection Manager
+2. In the extension settings, select a different profile for "Connection Profile"
+3. The extension will automatically switch to that profile when summarizing
+4. Your main roleplay will continue using your primary profile
+
+**Example Setup:**
+- Main Profile: Claude Opus (for high-quality roleplay)
+- Summary Profile: GPT-4o-mini (for fast, cheap summaries)
+- Result: Best of both worlds - premium roleplay with efficient summarization
 
 ## Performance
 
