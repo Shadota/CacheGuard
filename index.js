@@ -370,6 +370,7 @@ function calculate_truncation_index() {
     let message_token_map = get_prompt_message_tokens_from_raw(last_raw_prompt, chat);
     
     // Calculate non-chat budget
+    // The key insight: both total and chat tokens must come from the SAME prompt for the calculation to be accurate
     let nonChatBudget;
     
     if (SAVED_NON_CHAT_BUDGET !== null) {
@@ -377,8 +378,8 @@ function calculate_truncation_index() {
         nonChatBudget = SAVED_NON_CHAT_BUDGET;
         debug(`  Using saved non-chat budget: ${nonChatBudget}`);
     } else if (last_raw_prompt) {
-        // Calculate from CURRENT prompt size (which may be truncated) and its chat tokens
-        // The key: we need to use currentPromptSize (full context) not the raw prompt size
+        // Calculate from the raw prompt (both total and chat tokens from the SAME prompt)
+        let totalPromptTokens = count_tokens(last_raw_prompt);
         let promptChatTokens = 0;
         
         let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
@@ -386,9 +387,8 @@ function calculate_truncation_index() {
             promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
         }
         
-        // Use currentPromptSize as the total, since that's the FULL context before our truncation
-        nonChatBudget = Math.max(currentPromptSize - promptChatTokens, 0);
-        debug(`  Current prompt size: ${currentPromptSize}`);
+        nonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
+        debug(`  Total prompt tokens: ${totalPromptTokens}`);
         debug(`  Prompt chat tokens: ${promptChatTokens}`);
         debug(`  Calculated non-chat budget: ${nonChatBudget}`);
     } else {
