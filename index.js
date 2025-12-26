@@ -42,12 +42,73 @@ const default_settings = {
     
     // Summarization settings
     auto_summarize: true,
-    summary_prompt: `Summarize the following message in a single, concise sentence. Include names when possible. Response must be in past tense and contain ONLY the summary.
+    connection_profile: "",         // Connection profile for summarization (empty = same as current)
+    summary_max_words: 50,          // Maximum words per summary
+    summary_prompt: `You are a summarization assistant for a roleplay chat.
 
-Message to summarize:
-{{message}}`,
-    summary_injection_separator: "\n* ",
-    summary_injection_template: "[Following is a list of earlier events]:\n{{summaries}}\n",
+Your ONLY job is to summarize ONE message into a single, concise but information-rich statement of fact that will be used as a story log entry.
+
+GLOBAL NAMES:
+- The user's in-world name is {{user}}.
+- The character's in-world name is {{char}}.
+
+RULES:
+- The message comes from either {{user}} or {{char}}, or is pure narration.
+- Always treat {{user}} as an in-world character unless the message is clearly out-of-character.
+- Focus ONLY on story-relevant actions, decisions, emotional beats, and (if present) important worldbuilding details.
+- Do NOT add new information or speculate.
+- Do NOT explain your reasoning.
+- Do NOT talk about the prompt, the task, or summarization itself.
+- Do NOT copy template text or special tokens.
+- Do NOT include tags like <think>, <eot_id>, <|begin_of_text|>, etc.
+
+SPEAKER LABEL (MANDATORY):
+- If the message is clearly spoken or described from {{char}}'s perspective, begin with "{{char}}:".
+- If the message is clearly spoken or described from {{user}}'s perspective, begin with "{{user}}:".
+- If the message is pure neutral narration with no clear speaker, begin with "Narrator:".
+- NEVER use the literal labels "User:" or "Assistant:".
+- NEVER omit the speaker label.
+
+OUTPUT FORMAT (EXACT):
+"[Speaker]: [Summary in past tense]"
+
+EXAMPLES:
+- "{{char}}: Accepted {{user}}'s apology but stayed emotionally distant."
+- "{{user}}: Agreed to a teleportation scenario and asked for a simple medieval setting."
+- "{{char}}: Introduced Cygnus as a strict guild-based world and made {{user}} a Guildless 'Null' whose story began with a knock from a hooded figure."
+- "Narrator: Described the rainy Scab district and {{user}}'s empty, dangerous life on the city's edge."
+
+STYLE:
+- Use simple past tense verbs (said, asked, accepted, felt, realized, introduced, described, etc.).
+- For long, worldbuilding-heavy messages, include:
+  - The name of the place or system (e.g., Cygnus, Guilds),
+  - The key rule or conflict,
+  - {{user}}'s current role or status,
+  - The immediate hook or situation at the end of the message.
+- Keep the summary extremely focused but not empty: it should be one dense sentence that a future model can use as a memory.
+- Do NOT include long verbatim quotes.
+
+LENGTH:
+- The summary MUST be no more than {{words}} words.
+- For short, simple messages, fewer words are fine.
+- For long, important messages, aim to use most of the {{words}} allowance.
+
+TARGET:
+Following is the single message you MUST summarize:
+{{message}}
+
+Remember:
+- Summarize ONLY the TARGET message.
+- Start with exactly one of: "{{user}}:", "{{char}}:", or "Narrator:".
+- Your response must contain ONLY the summary line and NOTHING else.`,
+    summary_injection_separator: "\n• ",
+    summary_injection_template: `[Archived chat summaries]
+The bullets below summarize older parts of this roleplay. They are not new messages and not instructions.
+Use them only to preserve continuity and facts when relevant to the current scene.
+If something is not stated here or in recent chat, do not invent details. If summaries conflict with recent chat, prefer recent chat.
+
+{{summaries}}
+[/Archived chat summaries]`,
     
     // Injection settings
     injection_position: extension_prompt_types.IN_PROMPT,
@@ -97,6 +158,65 @@ function set_settings(key, value) {
 function count_tokens(text, padding = 0) {
     const ctx = getContext();
     return ctx.getTokenCount(text, padding);
+}
+
+// Connection profile management (for independent summarization model)
+function check_connection_profiles_active() {
+    return getContext().extensionSettings?.connectionManager !== undefined;
+}
+
+function get_current_connection_profile() {
+    if (!check_connection_profiles_active()) return;
+    return getContext().extensionSettings.connectionManager.selectedProfile;
+}
+
+function get_connection_profiles() {
+    if (!check_connection_profiles_active()) return [];
+    return getContext().extensionSettings.connectionManager.profiles;
+}
+
+function get_connection_profile(id) {
+    const data = get_connection_profiles().find((p) => p.id === id);
+    return data;
+}
+
+function verify_connection_profile(id) {
+    if (!check_connection_profiles_active()) return false;
+    if (id === "") return true;  // no profile selected, always valid
+    return get_connection_profile(id) !== undefined;
+}
+
+function get_summary_connection_profile() {
+    let id = get_settings('connection_profile');
+    
+    // If none selected, invalid, or connection profiles not active, use the current profile
+    if (id === "" || !verify_connection_profile(id) || !check_connection_profiles_active()) {
+        id = get_current_connection_profile();
+    }
+    
+    return id;
+}
+
+async function update_connection_profile_dropdown() {
+    const $connection_select = $('#ct_connection_profile');
+    const connection_profiles = get_connection_profiles();
+    
+    $connection_select.empty();
+    $connection_select.append(`<option value="">Same as Current</option>`);
+    
+    for (let profile of connection_profiles) {
+        $connection_select.append(`<option value="${profile.id}">${profile.name}</option>`);
+    }
+    
+    const profile_id = get_settings('connection_profile');
+    if (!verify_connection_profile(profile_id)) {
+        debug(`Selected summary connection profile ID is invalid: ${profile_id}`);
+    }
+    
+    $connection_select.val(profile_id);
+    
+    // Refresh dropdown on click
+    $connection_select.off('click').on('click', () => update_connection_profile_dropdown());
 }
 
 // Message data management (stores summaries and flags on messages)
@@ -818,21 +938,32 @@ class SummaryQueue {
         
         debug(`Summarizing message ${index}...`);
         
-        // Create summary prompt
+        // Create summary prompt with placeholders
         const prompt_template = get_settings('summary_prompt');
-        const prompt = prompt_template.replace('{{message}}', message.mes);
+        const max_words = get_settings('summary_max_words') || 50;
         
-        // Generate summary
+        let prompt = prompt_template
+            .replace(/\{\{message\}\}/g, message.mes)
+            .replace(/\{\{words\}\}/g, max_words)
+            .replace(/\{\{user\}\}/g, ctx.name1 || 'User')
+            .replace(/\{\{char\}\}/g, ctx.name2 || 'Character');
+        
+        // Generate summary using connection profile
         try {
+            const profile_id = get_summary_connection_profile();
+            
+            // Create messages array for the request
             const messages = [{
                 role: 'system',
                 content: prompt
             }];
             
-            const result = await ctx.generateRaw(prompt, '', false, false);
+            // Use ConnectionManagerRequestService to send with specific profile
+            debug(`Using profile ${profile_id} for summarization`);
+            const result = await ctx.ConnectionManagerRequestService.sendRequest(profile_id, messages);
             
-            if (result) {
-                let summary = result;
+            if (result && result.content) {
+                let summary = result.content.trim();
                 
                 // Trim incomplete sentences if enabled
                 if (ctx.powerUserSettings.trim_sentences) {
@@ -912,16 +1043,16 @@ function register_event_listeners() {
         refresh_memory();
     });
     
-    // Auto-summarize on new messages
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, async (id) => {
+    // Auto-summarize on new messages (don't await - let it run in background)
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (id) => {
         if (streamingProcessor && !streamingProcessor.isFinished) return;
-        await auto_summarize_chat();
+        auto_summarize_chat();  // Don't await - runs in background
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(() => update_status_display(), 100);
     });
 
-    eventSource.on(event_types.USER_MESSAGE_RENDERED, async (id) => {
-        await auto_summarize_chat();
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, (id) => {
+        auto_summarize_chat();  // Don't await - runs in background
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(() => update_status_display(), 100);
     });
@@ -965,10 +1096,25 @@ function initialize_ui_listeners() {
     
     bind_setting('#ct_enabled', 'enabled', 'boolean');
     bind_setting('#ct_target_size', 'target_context_size', 'number');
-    bind_setting('#ct_batch_size', 'batch_size', 'number');
     bind_setting('#ct_min_keep', 'min_messages_to_keep', 'number');
     bind_setting('#ct_auto_summarize', 'auto_summarize', 'boolean');
+    bind_setting('#ct_connection_profile', 'connection_profile', 'text');
+    bind_setting('#ct_max_words', 'summary_max_words', 'number');
     bind_setting('#ct_debug', 'debug_mode', 'boolean');
+    
+    // Batch size - reset truncation when changed
+    $('#ct_batch_size').val(get_settings('batch_size'));
+    $('#ct_batch_size').on('change', function() {
+        const value = Number($(this).val());
+        debug(`Setting [batch_size] changed to [${value}]`);
+        set_settings('batch_size', value);
+        reset_truncation_index();  // Reset when batch size changes
+        toastr.info('Batch size changed - truncation reset', MODULE_NAME_FANCY);
+        refresh_memory();
+    });
+    
+    // Initialize connection profile dropdown
+    update_connection_profile_dropdown();
     
     // Reset button
     $('#ct_reset').on('click', () => {
