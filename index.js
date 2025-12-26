@@ -349,39 +349,25 @@ function calculate_truncation_index() {
     
     // Calculate non-chat budget from the current raw prompt
     // Both total and chat tokens must come from the SAME prompt for accuracy
-    let totalPromptTokens = last_raw_prompt ? count_tokens(last_raw_prompt) : currentPromptSize;
-    let promptChatTokens = 0;
-    let promptChatTokensSource = 'raw_prompt';
-    
-    if (last_raw_prompt) {
-        let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
-        if (segments && segments.length > 0) {
-            promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
-        }
+    // If we don't have a raw prompt, we can't calculate accurately, so return 0 (no truncation)
+    if (!last_raw_prompt) {
+        debug(`  No raw prompt available - cannot calculate non-chat budget`);
+        debug(`  Skipping truncation calculation until first generation completes`);
+        return 0;
     }
     
-    // Fallback to itemizedPrompts if we couldn't get chat tokens from raw prompt
-    if (promptChatTokens === 0 && !last_raw_prompt) {
-        promptChatTokensSource = 'itemized_prompts';
-        for (let i = 0; i < itemizedPrompts.length; i++) {
-            let itemized_prompt = itemizedPrompts[i];
-            if (itemized_prompt?.mesId === undefined || itemized_prompt?.mesId === null) {
-                continue;
-            }
-            let token_count = itemized_prompt?.tokenCount;
-            if (token_count === undefined) {
-                let raw_prompt = itemized_prompt?.rawPrompt;
-                if (Array.isArray(raw_prompt)) raw_prompt = raw_prompt.map(x => x.content).join('\n');
-                token_count = count_tokens(raw_prompt ?? '');
-            }
-            promptChatTokens += token_count;
-        }
+    let totalPromptTokens = count_tokens(last_raw_prompt);
+    let promptChatTokens = 0;
+    
+    let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+    if (segments && segments.length > 0) {
+        promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
     }
     
     const nonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
     
     debug(`  Total prompt tokens: ${totalPromptTokens}`);
-    debug(`  Prompt chat tokens: ${promptChatTokens} (source: ${promptChatTokensSource})`);
+    debug(`  Prompt chat tokens: ${promptChatTokens}`);
     debug(`  Non-chat budget: ${nonChatBudget}`);
     
     // Track token map usage
