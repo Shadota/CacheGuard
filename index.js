@@ -465,10 +465,18 @@ function calculate_truncation_index() {
     
     const finalIndex = Math.max(nextIndex, currentIndex);
     
+    const predictedChatSize = estimateChatSize(finalIndex);
+    const predictedTotal = predictedChatSize + nonChatBudget;
+    
     debug(`  Final truncation index: ${finalIndex}`);
-    debug(`  Final chat size: ${estimateChatSize(finalIndex)}`);
-    debug(`  Final total: ${estimateChatSize(finalIndex) + nonChatBudget}`);
+    debug(`  Final chat size: ${predictedChatSize}`);
+    debug(`  Final total: ${predictedTotal}`);
     debug(`  Token map: ${map_hits} hits, ${map_misses} misses (${message_token_map ? message_token_map.size : 0} entries)`);
+    
+    // Store predictions for comparison with actual results
+    LAST_PREDICTED_SIZE = predictedTotal;
+    LAST_PREDICTED_CHAT_SIZE = predictedChatSize;
+    LAST_PREDICTED_NON_CHAT_SIZE = nonChatBudget;
     
     return finalIndex;
 }
@@ -617,6 +625,9 @@ function refresh_memory() {
 // Global variable to store context size from intercept
 let CURRENT_CONTEXT_SIZE = 0;
 let LAST_ACTUAL_PROMPT_SIZE = 0;
+let LAST_PREDICTED_SIZE = 0;
+let LAST_PREDICTED_CHAT_SIZE = 0;
+let LAST_PREDICTED_NON_CHAT_SIZE = 0;
 
 // Message interception hook (called by SillyTavern before generation)
 globalThis.truncator_intercept_messages = function (chat, contextSize, abort, type) {
@@ -677,6 +688,51 @@ function update_status_display() {
     const targetSize = get_settings('target_context_size');
     const difference = actualSize - targetSize;
     const percentError = Math.abs((difference / targetSize) * 100);
+    
+    // Diagnostic logging: compare prediction with actual
+    if (get_settings('debug') && LAST_PREDICTED_SIZE > 0) {
+        debug('=== PREDICTION vs ACTUAL ANALYSIS ===');
+        debug(`  PREDICTED total: ${LAST_PREDICTED_SIZE} tokens`);
+        debug(`  PREDICTED chat: ${LAST_PREDICTED_CHAT_SIZE} tokens`);
+        debug(`  PREDICTED non-chat: ${LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
+        debug(`  ACTUAL total: ${actualSize} tokens`);
+        debug(`  DIFFERENCE: ${LAST_PREDICTED_SIZE - actualSize} tokens (${((LAST_PREDICTED_SIZE - actualSize) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
+        
+        // Analyze actual chat vs non-chat from current prompt
+        const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+        const actualChatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
+        const actualNonChatTokens = actualSize - actualChatTokens;
+        
+        debug(`  ACTUAL chat: ${actualChatTokens} tokens`);
+        debug(`  ACTUAL non-chat: ${actualNonChatTokens} tokens`);
+        debug(`  Chat difference: ${LAST_PREDICTED_CHAT_SIZE - actualChatTokens} tokens`);
+        debug(`  Non-chat difference: ${LAST_PREDICTED_NON_CHAT_SIZE - actualNonChatTokens} tokens`);
+    }
+    
+    // Diagnostic logging: analyze itemizedPrompts
+    const itemized = ctx.getLastItemizedPrompts();
+    if (itemized && get_settings('debug')) {
+        debug('=== ITEMIZED PROMPTS ANALYSIS ===');
+        let totalItemized = 0;
+        for (const [key, value] of Object.entries(itemized)) {
+            const tokens = count_tokens(value);
+            totalItemized += tokens;
+            debug(`  ${key}: ${tokens} tokens`);
+        }
+        debug(`  TOTAL from itemized: ${totalItemized} tokens`);
+        debug(`  ACTUAL from raw prompt: ${actualSize} tokens`);
+        debug(`  DIFFERENCE: ${totalItemized - actualSize} tokens`);
+        
+        // Analyze chat messages specifically
+        if (itemized.chatHistory) {
+            const chatTokens = count_tokens(itemized.chatHistory);
+            const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+            const segmentTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
+            debug(`  Chat from itemized: ${chatTokens} tokens`);
+            debug(`  Chat from segments: ${segmentTokens} tokens`);
+            debug(`  Chat difference: ${chatTokens - segmentTokens} tokens`);
+        }
+    }
     
     // Determine color based on error percentage
     let bgColor, textColor;
