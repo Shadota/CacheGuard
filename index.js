@@ -691,13 +691,19 @@ globalThis.truncator_intercept_messages = function (chat, contextSize, abort, ty
 
 // Update status display after generation
 function update_status_display() {
+    debug('update_status_display called');
     const $display = $('#ct_status_display');
     const $text = $('#ct_status_text');
     
+    debug(`  $display found: ${$display.length > 0}`);
+    debug(`  $text found: ${$text.length > 0}`);
+    
     // Get the last prompt size
     const last_raw_prompt = get_last_prompt_raw();
+    debug(`  last_raw_prompt exists: ${!!last_raw_prompt}`);
     if (!last_raw_prompt) {
         $display.hide();
+        debug('  No raw prompt, hiding display');
         return;
     }
     
