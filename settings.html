@@ -101,6 +101,31 @@
                         </div>
                     </div>
 
+                    <!-- Predictions Card -->
+                    <div class="ct_stats_card">
+                        <div class="ct_card_header">
+                            <i class="fa-solid fa-clock"></i>
+                            <span>Next Events</span>
+                        </div>
+                        <div class="ct_card_content">
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Next Trim</span>
+                                <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Room Left</span>
+                                <span id="ct_ov_room_left" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Calibration</span>
+                                <span id="ct_ov_cal_status" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_prediction_disclaimer">
+                                <small><i class="fa-solid fa-info-circle"></i> Estimates based on recent message sizes</small>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Calibration Status Card -->
                     <div class="ct_stats_card">
                         <div class="ct_card_header">
@@ -123,6 +148,40 @@
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">Utilization</span>
                                 <span id="ct_ov_cal_util" class="ct_stat_value">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Summarization Stats Card -->
+                    <div class="ct_stats_card">
+                        <div class="ct_card_header">
+                            <i class="fa-solid fa-file-lines"></i>
+                            <span>Summarization</span>
+                        </div>
+                        <div class="ct_card_content">
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Total Messages</span>
+                                <span id="ct_ov_sum_total" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Summarized</span>
+                                <span id="ct_ov_sum_done" class="ct_stat_value ct_text_green">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Pending</span>
+                                <span id="ct_ov_sum_pending" class="ct_stat_value ct_text_yellow">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">In Queue</span>
+                                <span id="ct_ov_sum_queue" class="ct_stat_value ct_text_orange">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">In Context</span>
+                                <span id="ct_ov_sum_active" class="ct_stat_value ct_text_blue">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">N/A</span>
+                                <span id="ct_ov_sum_na" class="ct_stat_value ct_text_gray">--</span>
                             </div>
                         </div>
                     </div>
@@ -304,6 +363,37 @@
                         <span>Summarize All Messages</span>
                     </button>
                     <small>Manually summarize all messages in the current chat that don't have summaries yet</small>
+                </div>
+
+                <!-- Summarization Statistics Panel -->
+                <div id="ct_summary_stats_panel" class="ct_calibration_panel" style="margin-top: 15px;">
+                    <div class="ct_calibration_header">
+                        <i class="fa-solid fa-file-lines"></i>
+                        <span>Summarization Statistics</span>
+                    </div>
+                    <div class="ct_calibration_content">
+                        <!-- Progress bar showing summarization status -->
+                        <div class="ct_sum_progress_container">
+                            <div class="ct_sum_progress_bar">
+                                <div id="ct_sum_bar_done" class="ct_sum_bar_segment ct_sum_done" style="width: 0%"></div>
+                                <div id="ct_sum_bar_pending" class="ct_sum_bar_segment ct_sum_pending" style="width: 0%"></div>
+                                <div id="ct_sum_bar_queue" class="ct_sum_bar_segment ct_sum_queue" style="width: 0%"></div>
+                                <div id="ct_sum_bar_active" class="ct_sum_bar_segment ct_sum_active" style="width: 0%"></div>
+                                <div id="ct_sum_bar_na" class="ct_sum_bar_segment ct_sum_na" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div class="ct_sum_legend">
+                            <span class="ct_sum_legend_item"><span class="ct_legend_dot ct_sum_done"></span>Summarized (<span id="ct_sum_done_count">0</span>)</span>
+                            <span class="ct_sum_legend_item"><span class="ct_legend_dot ct_sum_pending"></span>Pending (<span id="ct_sum_pending_count">0</span>)</span>
+                            <span class="ct_sum_legend_item"><span class="ct_legend_dot ct_sum_queue"></span>In Queue (<span id="ct_sum_queue_count">0</span>)</span>
+                            <span class="ct_sum_legend_item"><span class="ct_legend_dot ct_sum_active"></span>In Context (<span id="ct_sum_active_count">0</span>)</span>
+                            <span class="ct_sum_legend_item"><span class="ct_legend_dot ct_sum_na"></span>N/A (<span id="ct_sum_na_count">0</span>)</span>
+                        </div>
+                        <div class="ct_calibration_row" style="margin-top: 10px;">
+                            <span class="ct_calibration_label">Total Messages:</span>
+                            <span id="ct_sum_total_count" class="ct_calibration_value">0</span>
+                        </div>
+                    </div>
                 </div>
 
                 <hr>

@@ -1426,6 +1426,221 @@ function update_overview_tab() {
     
     // Update Qdrant Memory Section in Overview
     update_overview_memories();
+    
+    // Update Predictions and Summarization Stats
+    update_prediction_display();
+    update_summary_stats_display();
+}
+
+// ==================== SUMMARIZATION STATISTICS ====================
+
+// Collect summarization statistics from the current chat
+function collect_summarization_stats() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    const stats = {
+        total: 0,
+        summarized: 0,
+        pending: 0,
+        inQueue: 0,
+        inContext: 0,
+        notApplicable: 0
+    };
+    
+    if (!chat || chat.length === 0) {
+        return stats;
+    }
+    
+    const truncIndex = TRUNCATION_INDEX || 0;
+    const queueIndexes = new Set(summaryQueue.queue);
+    
+    for (let i = 0; i < chat.length; i++) {
+        const message = chat[i];
+        
+        // Skip system messages
+        if (message.is_system) {
+            continue;
+        }
+        
+        stats.total++;
+        
+        const lagging = i < truncIndex;  // Message is excluded from context
+        const hasSummary = !!get_memory(message);
+        const needsSummary = get_data(message, 'needs_summary');
+        const inQueue = queueIndexes.has(i);
+        
+        if (inQueue) {
+            // Currently in the summarization queue
+            stats.inQueue++;
+        } else if (!lagging) {
+            // Message is in active context (not excluded)
+            stats.inContext++;
+        } else if (hasSummary) {
+            // Excluded message that has been summarized
+            stats.summarized++;
+        } else if (needsSummary) {
+            // Excluded message waiting to be summarized
+            stats.pending++;
+        } else {
+            // Message that doesn't need summarization (too short, excluded by settings, etc.)
+            stats.notApplicable++;
+        }
+    }
+    
+    return stats;
+}
+
+// Estimate how many generations until next batch trim
+function estimate_generations_to_trim() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!chat || chat.length === 0 || !LAST_ACTUAL_PROMPT_SIZE) {
+        return { generations: null, roomLeft: null };
+    }
+    
+    const targetSize = get_settings('target_context_size');
+    const batchSize = get_settings('batch_size');
+    
+    // Calculate room left until target is exceeded
+    const roomLeft = Math.max(0, targetSize - LAST_ACTUAL_PROMPT_SIZE);
+    
+    if (roomLeft <= 0) {
+        return { generations: 0, roomLeft: 0 };
+    }
+    
+    // Estimate average tokens per generation from recent messages
+    // Look at the last few messages to get an average
+    const lookbackCount = 5;
+    let totalTokens = 0;
+    let messageCount = 0;
+    
+    for (let i = Math.max(0, chat.length - lookbackCount); i < chat.length; i++) {
+        const message = chat[i];
+        if (!message.is_system && message.mes) {
+            totalTokens += count_tokens(message.mes);
+            messageCount++;
+        }
+    }
+    
+    if (messageCount === 0) {
+        return { generations: null, roomLeft };
+    }
+    
+    // Average tokens per message (assuming roughly 2 messages per generation: user + assistant)
+    const avgTokensPerMessage = totalTokens / messageCount;
+    const avgTokensPerGeneration = avgTokensPerMessage * 2;
+    
+    // Estimate generations until target exceeded
+    const estimatedGenerations = Math.floor(roomLeft / avgTokensPerGeneration);
+    
+    return {
+        generations: estimatedGenerations,
+        roomLeft: roomLeft,
+        avgTokensPerGen: Math.round(avgTokensPerGeneration)
+    };
+}
+
+// Get calibration prediction text
+function get_calibration_prediction() {
+    if (!get_settings('auto_calibrate_target')) {
+        return { text: 'Auto-Calibration Disabled', class: '' };
+    }
+    
+    switch (CALIBRATION_STATE) {
+        case 'INITIAL_TRAINING':
+            const trainingLeft = TRAINING_GENERATIONS - GENERATION_COUNT;
+            return {
+                text: `Training: ${trainingLeft} gen${trainingLeft !== 1 ? 's' : ''} remaining`,
+                class: 'ct_text_yellow'
+            };
+        case 'CALIBRATING':
+            const calibratingLeft = STABLE_THRESHOLD - STABLE_COUNT;
+            return {
+                text: `Calibrating: ${calibratingLeft} stable gen${calibratingLeft !== 1 ? 's' : ''} needed`,
+                class: 'ct_text_orange'
+            };
+        case 'RETRAINING':
+            const retrainingLeft = TRAINING_GENERATIONS - RETRAIN_COUNT;
+            return {
+                text: `Retraining: ${retrainingLeft} gen${retrainingLeft !== 1 ? 's' : ''} remaining`,
+                class: 'ct_text_blue'
+            };
+        case 'STABLE':
+            return {
+                text: 'Stable - Monitoring',
+                class: 'ct_text_green'
+            };
+        default:
+            return { text: 'Unknown', class: '' };
+    }
+}
+
+// Update the Predictions Card in Overview
+function update_prediction_display() {
+    const trimEstimate = estimate_generations_to_trim();
+    const calibrationPrediction = get_calibration_prediction();
+    
+    // Next Trim prediction (matches HTML ID: ct_ov_next_trim)
+    if (trimEstimate.generations !== null) {
+        if (trimEstimate.generations === 0) {
+            $('#ct_ov_next_trim').text('Imminent (target exceeded)').addClass('ct_text_orange');
+        } else {
+            $('#ct_ov_next_trim').text(`~${trimEstimate.generations} generation${trimEstimate.generations !== 1 ? 's' : ''}`).removeClass('ct_text_orange');
+        }
+    } else {
+        $('#ct_ov_next_trim').text('--').removeClass('ct_text_orange');
+    }
+    
+    // Room Left (matches HTML ID: ct_ov_room_left)
+    if (trimEstimate.roomLeft !== null) {
+        $('#ct_ov_room_left').text(`${trimEstimate.roomLeft.toLocaleString()} tokens`);
+    } else {
+        $('#ct_ov_room_left').text('--');
+    }
+    
+    // Calibration Status (matches HTML ID: ct_ov_cal_status)
+    $('#ct_ov_cal_status')
+        .text(calibrationPrediction.text)
+        .removeClass('ct_text_green ct_text_yellow ct_text_orange ct_text_blue')
+        .addClass(calibrationPrediction.class);
+}
+
+// Update Summarization Stats Display (both Overview and Truncation tabs)
+function update_summary_stats_display() {
+    const stats = collect_summarization_stats();
+    
+    // Calculate percentages for progress bar
+    const total = stats.total || 1;  // Avoid division by zero
+    const pctDone = (stats.summarized / total) * 100;
+    const pctPending = (stats.pending / total) * 100;
+    const pctQueue = (stats.inQueue / total) * 100;
+    const pctActive = (stats.inContext / total) * 100;
+    const pctNA = (stats.notApplicable / total) * 100;
+    
+    // Update Overview tab stats card (matches HTML IDs: ct_ov_sum_*)
+    $('#ct_ov_sum_total').text(stats.total);
+    $('#ct_ov_sum_done').text(stats.summarized);
+    $('#ct_ov_sum_pending').text(stats.pending);
+    $('#ct_ov_sum_queue').text(stats.inQueue);
+    $('#ct_ov_sum_active').text(stats.inContext);
+    $('#ct_ov_sum_na').text(stats.notApplicable);
+    
+    // Update Truncation tab stats panel (matches HTML IDs: ct_sum_*_count)
+    $('#ct_sum_total_count').text(stats.total);
+    $('#ct_sum_done_count').text(stats.summarized);
+    $('#ct_sum_pending_count').text(stats.pending);
+    $('#ct_sum_queue_count').text(stats.inQueue);
+    $('#ct_sum_active_count').text(stats.inContext);
+    $('#ct_sum_na_count').text(stats.notApplicable);
+    
+    // Update progress bar segments
+    $('#ct_sum_bar_done').css('width', `${pctDone}%`);
+    $('#ct_sum_bar_pending').css('width', `${pctPending}%`);
+    $('#ct_sum_bar_queue').css('width', `${pctQueue}%`);
+    $('#ct_sum_bar_active').css('width', `${pctActive}%`);
+    $('#ct_sum_bar_na').css('width', `${pctNA}%`);
 }
 
 // Update the memory display in Overview tab

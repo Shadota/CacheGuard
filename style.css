@@ -759,3 +759,95 @@
         max-height: calc(100vh - var(--topBarBlockSize, 50px) - 60px);
     }
 }
+
+/* ==================== PREDICTION DISCLAIMER ==================== */
+.ct_prediction_disclaimer {
+    font-size: 0.75em;
+    opacity: 0.6;
+    font-style: italic;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--SmartThemeBorderColor);
+    text-align: center;
+}
+
+/* ==================== TEXT COLOR HELPERS ==================== */
+.ct_text_green {
+    color: #4caf50;
+}
+
+.ct_text_yellow {
+    color: #ffcc00;
+}
+
+.ct_text_orange {
+    color: #ff9800;
+}
+
+.ct_text_blue {
+    color: #2196f3;
+}
+
+.ct_text_gray {
+    color: #9e9e9e;
+}
+
+/* ==================== SUMMARIZATION PROGRESS BAR ==================== */
+.ct_sum_progress_container {
+    margin-bottom: 10px;
+}
+
+.ct_sum_progress_bar {
+    height: 16px;
+    background: var(--black50a);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+}
+
+.ct_sum_bar_segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+/* Summarization status colors */
+.ct_sum_done {
+    background: #4caf50;
+}
+
+.ct_sum_pending {
+    background: #ffcc00;
+}
+
+.ct_sum_queue {
+    background: #ff9800;
+}
+
+.ct_sum_active {
+    background: #2196f3;
+}
+
+.ct_sum_na {
+    background: #9e9e9e;
+}
+
+/* ==================== SUMMARIZATION LEGEND ==================== */
+.ct_sum_legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 0.8em;
+}
+
+.ct_sum_legend_item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ct_legend_dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
