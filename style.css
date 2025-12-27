@@ -526,7 +526,7 @@
 }
 
 .ct_breakdown_free {
-    background: var(--black30a);
+    background: #5a5a5a;
 }
 
 .ct_breakdown_legend {
@@ -619,7 +619,7 @@
     position: fixed;
     top: var(--topBarBlockSize, 50px);
     right: 10px;
-    width: 420px;
+    width: 480px;
     max-width: calc(100vw - 20px);
     max-height: calc(100vh - var(--topBarBlockSize, 50px) - 20px);
     overflow: hidden;
@@ -859,4 +859,141 @@
     height: 10px;
     border-radius: 50%;
     display: inline-block;
+}
+
+/* ==================== TOKEN COUNTS FOLDABLE SECTION ==================== */
+.ct_breakdown_details_toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px;
+    margin-top: 10px;
+    cursor: pointer;
+    font-size: 0.85em;
+    opacity: 0.7;
+    transition: opacity 0.2s ease;
+}
+
+.ct_breakdown_details_toggle:hover {
+    opacity: 1;
+}
+
+.ct_breakdown_details_toggle i {
+    transition: transform 0.2s ease;
+}
+
+.ct_breakdown_details_toggle.expanded i {
+    transform: rotate(180deg);
+}
+
+.ct_breakdown_details {
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--black50a);
+    border-radius: 6px;
+}
+
+.ct_breakdown_detail_row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 0.85em;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.ct_breakdown_detail_row:last-child {
+    border-bottom: none;
+}
+
+.ct_breakdown_detail_row.ct_breakdown_total {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    border-bottom: none;
+}
+
+.ct_breakdown_label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ct_breakdown_value {
+    font-weight: 500;
+}
+
+/* ==================== FOLDABLE STATS CARDS ==================== */
+.ct_collapsible_toggle {
+    cursor: pointer;
+    display: flex !important;
+    justify-content: space-between !important;
+}
+
+.ct_card_header_left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ct_collapse_icon {
+    opacity: 0.6;
+    transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.ct_collapsible_toggle:hover .ct_collapse_icon {
+    opacity: 1;
+}
+
+.ct_collapsible[data-collapsed="true"] .ct_collapse_icon {
+    transform: rotate(-90deg);
+}
+
+.ct_collapsible[data-collapsed="true"] .ct_collapsible_content {
+    display: none;
+}
+
+/* ==================== POPOUT TABS COMPACT ==================== */
+#ct_popout .ct_tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    justify-content: center;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+#ct_popout .ct_tabs::-webkit-scrollbar {
+    display: none;
+}
+
+#ct_popout .ct_tab {
+    padding: 6px 10px;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+/* ==================== POPOUT LOCK BUTTON ==================== */
+#ct_popout .dragLock {
+    cursor: pointer;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#ct_popout .dragLock:hover {
+    opacity: 1;
+}
+
+#ct_popout .dragLock.locked {
+    color: #4caf50;
+    opacity: 1;
+}
+
+#ct_popout.position-locked .panelControlBar {
+    cursor: default;
+}
+
+#ct_popout.position-locked .drag-grabber {
+    opacity: 0.3;
+    cursor: not-allowed;
 }

@@ -61,19 +61,81 @@
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_qdrant"></span>Qdrant</span>
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_free"></span>Free</span>
                         </div>
+                        <!-- Token Counts Foldable Section -->
+                        <div class="ct_breakdown_details_toggle" id="ct_breakdown_toggle">
+                            <span>Show Token Counts</span>
+                            <i class="fa-solid fa-chevron-down"></i>
+                        </div>
+                        <div class="ct_breakdown_details" id="ct_breakdown_details" style="display: none;">
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_chat"></span>Chat</span>
+                                <span id="ct_breakdown_chat_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_system"></span>System</span>
+                                <span id="ct_breakdown_system_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_summaries"></span>Summaries</span>
+                                <span id="ct_breakdown_summaries_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_qdrant"></span>Qdrant</span>
+                                <span id="ct_breakdown_qdrant_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_free"></span>Free</span>
+                                <span id="ct_breakdown_free_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row ct_breakdown_total">
+                                <span class="ct_breakdown_label"><strong>Total Used</strong></span>
+                                <span id="ct_breakdown_total_tokens" class="ct_breakdown_value"><strong>-- / -- tokens</strong></span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
                 <!-- Stats Cards Grid -->
                 <div class="ct_stats_grid">
                     
-                    <!-- Truncation Stats Card -->
-                    <div class="ct_stats_card">
-                        <div class="ct_card_header">
-                            <i class="fa-solid fa-scissors"></i>
-                            <span>Truncation Stats</span>
+                    <!-- Next Events Card (Predictions) - FIRST -->
+                    <div class="ct_stats_card ct_collapsible" data-collapsed="false">
+                        <div class="ct_card_header ct_collapsible_toggle">
+                            <div class="ct_card_header_left">
+                                <i class="fa-solid fa-clock"></i>
+                                <span>Next Events</span>
+                            </div>
+                            <i class="fa-solid fa-chevron-down ct_collapse_icon"></i>
                         </div>
-                        <div class="ct_card_content">
+                        <div class="ct_card_content ct_collapsible_content">
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Next Trim</span>
+                                <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Room Left</span>
+                                <span id="ct_ov_room_left" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Calibration</span>
+                                <span id="ct_ov_cal_status" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_prediction_disclaimer">
+                                <small><i class="fa-solid fa-info-circle"></i> Estimates based on recent message sizes</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Truncation Stats Card -->
+                    <div class="ct_stats_card ct_collapsible" data-collapsed="false">
+                        <div class="ct_card_header ct_collapsible_toggle">
+                            <div class="ct_card_header_left">
+                                <i class="fa-solid fa-scissors"></i>
+                                <span>Truncation Stats</span>
+                            </div>
+                            <i class="fa-solid fa-chevron-down ct_collapse_icon"></i>
+                        </div>
+                        <div class="ct_card_content ct_collapsible_content">
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">Actual Size</span>
                                 <span id="ct_ov_actual_size" class="ct_stat_value">--</span>
@@ -101,38 +163,16 @@
                         </div>
                     </div>
 
-                    <!-- Predictions Card -->
-                    <div class="ct_stats_card">
-                        <div class="ct_card_header">
-                            <i class="fa-solid fa-clock"></i>
-                            <span>Next Events</span>
-                        </div>
-                        <div class="ct_card_content">
-                            <div class="ct_stat_row">
-                                <span class="ct_stat_label">Next Trim</span>
-                                <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
-                            </div>
-                            <div class="ct_stat_row">
-                                <span class="ct_stat_label">Room Left</span>
-                                <span id="ct_ov_room_left" class="ct_stat_value">--</span>
-                            </div>
-                            <div class="ct_stat_row">
-                                <span class="ct_stat_label">Calibration</span>
-                                <span id="ct_ov_cal_status" class="ct_stat_value">--</span>
-                            </div>
-                            <div class="ct_prediction_disclaimer">
-                                <small><i class="fa-solid fa-info-circle"></i> Estimates based on recent message sizes</small>
-                            </div>
-                        </div>
-                    </div>
-
                     <!-- Calibration Status Card -->
-                    <div class="ct_stats_card">
-                        <div class="ct_card_header">
-                            <i class="fa-solid fa-chart-line"></i>
-                            <span>Calibration Status</span>
+                    <div class="ct_stats_card ct_collapsible" data-collapsed="false">
+                        <div class="ct_card_header ct_collapsible_toggle">
+                            <div class="ct_card_header_left">
+                                <i class="fa-solid fa-chart-line"></i>
+                                <span>Calibration Status</span>
+                            </div>
+                            <i class="fa-solid fa-chevron-down ct_collapse_icon"></i>
                         </div>
-                        <div class="ct_card_content">
+                        <div class="ct_card_content ct_collapsible_content">
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">Phase</span>
                                 <span id="ct_ov_cal_phase" class="ct_stat_value">--</span>
@@ -149,16 +189,23 @@
                                 <span class="ct_stat_label">Utilization</span>
                                 <span id="ct_ov_cal_util" class="ct_stat_value">--</span>
                             </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Message Changes</span>
+                                <span id="ct_ov_deletion_count" class="ct_stat_value ct_text_green">0/3</span>
+                            </div>
                         </div>
                     </div>
 
                     <!-- Summarization Stats Card -->
-                    <div class="ct_stats_card">
-                        <div class="ct_card_header">
-                            <i class="fa-solid fa-file-lines"></i>
-                            <span>Summarization</span>
+                    <div class="ct_stats_card ct_collapsible" data-collapsed="false">
+                        <div class="ct_card_header ct_collapsible_toggle">
+                            <div class="ct_card_header_left">
+                                <i class="fa-solid fa-file-lines"></i>
+                                <span>Summarization</span>
+                            </div>
+                            <i class="fa-solid fa-chevron-down ct_collapse_icon"></i>
                         </div>
-                        <div class="ct_card_content">
+                        <div class="ct_card_content ct_collapsible_content">
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">Total Messages</span>
                                 <span id="ct_ov_sum_total" class="ct_stat_value">--</span>

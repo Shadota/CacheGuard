@@ -129,6 +129,7 @@ let TRUNCATION_INDEX = null;  // Current truncation position
 
 // Popout state
 let POPOUT_VISIBLE = false;
+let POPOUT_LOCKED = false;
 let $POPOUT = null;
 let $DRAWER_CONTENT = null;
 
@@ -144,6 +145,12 @@ const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE stat
 // Qdrant token averaging for variance handling
 let QDRANT_TOKEN_HISTORY = [];  // Rolling history of Qdrant injection tokens
 const QDRANT_HISTORY_SIZE = 5;  // Number of samples to average
+
+// Message change resilience (deletion/edit tracking)
+let DELETION_COUNT = 0;           // Number of impactful deletions since last calibration checkpoint
+let LAST_CHAT_LENGTH = 0;         // Track chat length to detect deletions
+let LAST_CHAT_HASHES = new Map(); // Map of message index -> content hash for edit detection
+const DELETION_TOLERANCE = 3;     // Max deletions before soft recalibration
 
 // Utility functions
 function log(...args) {
@@ -459,6 +466,198 @@ function reset_truncation_index() {
     // The correction factor is learned over time and should persist across
     // target size changes to maintain calibration stability
     save_truncation_index();
+}
+
+// ==================== MESSAGE CHANGE RESILIENCE ====================
+
+// Compute a hash for message content (for edit detection)
+function compute_message_hash(message) {
+    if (!message || !message.mes) return null;
+    return getStringHash(message.mes);
+}
+
+// Take a snapshot of current chat state for change detection
+function snapshot_chat_state() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!chat) {
+        LAST_CHAT_LENGTH = 0;
+        LAST_CHAT_HASHES.clear();
+        return;
+    }
+    
+    LAST_CHAT_LENGTH = chat.length;
+    LAST_CHAT_HASHES.clear();
+    
+    for (let i = 0; i < chat.length; i++) {
+        const hash = compute_message_hash(chat[i]);
+        if (hash) {
+            LAST_CHAT_HASHES.set(i, hash);
+        }
+    }
+    
+    debug_trunc(`Snapshot taken: ${chat.length} messages, ${LAST_CHAT_HASHES.size} hashes`);
+}
+
+// Handle message deletion with smart truncation adjustment
+function handle_message_deleted() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    const currentLength = chat ? chat.length : 0;
+    const deletedCount = LAST_CHAT_LENGTH - currentLength;
+    
+    if (deletedCount <= 0) {
+        // No deletion detected or chat grew
+        LAST_CHAT_LENGTH = currentLength;
+        return;
+    }
+    
+    debug_trunc(`═══ MESSAGE DELETION DETECTED ═══`);
+    debug_trunc(`  Deleted: ${deletedCount} message(s)`);
+    debug_trunc(`  Previous length: ${LAST_CHAT_LENGTH}, Current: ${currentLength}`);
+    
+    // Determine deletion location relative to truncation index
+    let deletionsBeforeTruncation = 0;
+    let deletionsAfterTruncation = 0;
+    
+    if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
+        // Detect where deletions occurred using hash comparison
+        const oldHash = LAST_CHAT_HASHES.get(TRUNCATION_INDEX);
+        const newMessage = chat[TRUNCATION_INDEX];
+        const newHash = newMessage ? compute_message_hash(newMessage) : null;
+        
+        if (TRUNCATION_INDEX >= currentLength) {
+            // Truncation index is beyond current chat = deletions were before/at it
+            deletionsBeforeTruncation = deletedCount;
+            TRUNCATION_INDEX = Math.max(0, currentLength - 1);
+            debug_trunc(`  Truncation index adjusted to ${TRUNCATION_INDEX} (beyond chat)`);
+        } else if (oldHash && newHash && oldHash !== newHash) {
+            // Message at truncation point changed = deletion was before it
+            deletionsBeforeTruncation = deletedCount;
+            TRUNCATION_INDEX = Math.max(0, TRUNCATION_INDEX - deletedCount);
+            debug_trunc(`  Truncation index adjusted to ${TRUNCATION_INDEX} (hash mismatch)`);
+        } else {
+            // Hash at truncation point is same = deletions were after it
+            deletionsAfterTruncation = deletedCount;
+            debug_trunc(`  Deletions were after truncation point - no index adjustment`);
+        }
+    } else {
+        // No truncation yet, all deletions are "after" (in recent context)
+        deletionsAfterTruncation = deletedCount;
+    }
+    
+    debug_trunc(`  Deletions before truncation: ${deletionsBeforeTruncation}`);
+    debug_trunc(`  Deletions after truncation: ${deletionsAfterTruncation}`);
+    
+    // Only count deletions that affect calibration (before/at truncation point)
+    // Deletions after truncation point are "free" - they don't destabilize anything
+    const impactfulDeletions = deletionsBeforeTruncation;
+    
+    if (impactfulDeletions > 0) {
+        DELETION_COUNT += impactfulDeletions;
+        debug_trunc(`  Impactful deletion count: ${DELETION_COUNT}/${DELETION_TOLERANCE}`);
+    } else {
+        debug_trunc(`  No impactful deletions (all were in recent context)`);
+    }
+    
+    // Check if tolerance exceeded
+    if (DELETION_COUNT >= DELETION_TOLERANCE) {
+        trigger_soft_recalibration('deletion tolerance exceeded');
+    }
+    
+    // Save updated truncation index
+    save_truncation_index();
+    
+    // Update snapshot
+    snapshot_chat_state();
+    
+    // Update UI
+    update_resilience_ui();
+    
+    // Refresh memory
+    refresh_memory();
+    
+    debug_trunc(`═══════════════════════════════`);
+}
+
+// Trigger soft recalibration (preserves correction factor)
+function trigger_soft_recalibration(reason) {
+    debug_trunc(`Triggering soft recalibration: ${reason}`);
+    
+    // Don't go back to WAITING or INITIAL_TRAINING
+    // Just reset to CALIBRATING to preserve learned correction factor
+    if (CALIBRATION_STATE === 'STABLE' || CALIBRATION_STATE === 'CALIBRATING') {
+        CALIBRATION_STATE = 'CALIBRATING';
+        STABLE_COUNT = 0;
+        DELETION_COUNT = 0;
+        
+        toastr.warning(
+            `Calibration reset due to ${reason}. Re-stabilizing...`,
+            MODULE_NAME_FANCY
+        );
+    } else if (CALIBRATION_STATE === 'RETRAINING') {
+        // Already retraining, just reset counter
+        DELETION_COUNT = 0;
+    }
+    // If WAITING or INITIAL_TRAINING, don't interrupt - these are essential
+    
+    update_calibration_ui();
+    update_resilience_ui();
+}
+
+// Detect message edits by comparing hashes
+function detect_message_edits() {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!chat) return;
+    
+    let editCount = 0;
+    
+    for (let i = 0; i < Math.min(chat.length, LAST_CHAT_LENGTH); i++) {
+        const oldHash = LAST_CHAT_HASHES.get(i);
+        const newHash = compute_message_hash(chat[i]);
+        
+        if (oldHash && newHash && oldHash !== newHash) {
+            editCount++;
+            debug_trunc(`Edit detected at message ${i}`);
+            
+            // Mark summary as stale if message was lagging (excluded from context)
+            const message = chat[i];
+            if (get_data(message, 'lagging') && get_memory(message)) {
+                set_data(message, 'needs_summary', true);
+                debug_trunc(`Marked message ${i} for re-summarization`);
+            }
+        }
+    }
+    
+    if (editCount > 0) {
+        debug_trunc(`Total edits detected: ${editCount}`);
+    }
+    
+    // Update snapshot after detection
+    snapshot_chat_state();
+}
+
+// Update resilience UI (deletion counter display)
+function update_resilience_ui() {
+    const $count = $('#ct_ov_deletion_count');
+    
+    if ($count.length === 0) return;
+    
+    const countText = `${DELETION_COUNT}/${DELETION_TOLERANCE}`;
+    $count.text(countText);
+    
+    // Color coding
+    $count.removeClass('ct_text_green ct_text_yellow ct_text_red');
+    if (DELETION_COUNT === 0) {
+        $count.addClass('ct_text_green');
+    } else if (DELETION_COUNT < DELETION_TOLERANCE) {
+        $count.addClass('ct_text_yellow');
+    } else {
+        $count.addClass('ct_text_red');
+    }
 }
 
 function should_recalculate_truncation() {
@@ -1140,8 +1339,10 @@ function calibrate_target_size(actualSize) {
                 
                 if (STABLE_COUNT >= STABLE_THRESHOLD) {
                     CALIBRATION_STATE = 'STABLE';
+                    DELETION_COUNT = 0;  // Reset deletion counter on reaching stable
                     debug_trunc(`  → Transitioning to STABLE`);
                     toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
+                    update_resilience_ui();
                 } else {
                     debug_trunc(`  → Remaining in CALIBRATING`);
                 }
@@ -1403,6 +1604,14 @@ function update_overview_tab() {
         $('#ct_breakdown_summaries').css('width', `${summaryPct}%`);
         $('#ct_breakdown_qdrant').css('width', `${qdrantPct}%`);
         $('#ct_breakdown_free').css('width', `${freePct}%`);
+        
+        // Update token counts in foldable section
+        $('#ct_breakdown_chat_tokens').text(`${chatTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_system_tokens').text(`${systemTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_summaries_tokens').text(`${summaryTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_qdrant_tokens').text(`${qdrantTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_free_tokens').text(`${freeTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_total_tokens').html(`<strong>${actualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
         
         // Update Truncation Stats Card
         const targetSize = get_settings('target_context_size');
@@ -1808,6 +2017,7 @@ function openPopout() {
                 <div class="title">${MODULE_NAME_FANCY}</div>
                 <div class="flex1"></div>
                 <div class="fa-solid fa-grip drag-grabber hoverglow" title="Drag to move"></div>
+                <div class="fa-solid fa-lock-open hoverglow dragLock" title="Lock position"></div>
                 <div class="fa-solid fa-circle-xmark hoverglow dragClose" title="Close"></div>
             </div>
             <div id="ct_popout_content_container"></div>
@@ -1846,6 +2056,9 @@ function openPopout() {
     
     // Set up close button handler
     $POPOUT.find('.dragClose').on('click', () => closePopout());
+    
+    // Set up lock button handler
+    $POPOUT.find('.dragLock').on('click', () => togglePopoutLock());
     
     // Show the popout with animation
     $POPOUT.fadeIn(250);
@@ -1892,6 +2105,27 @@ function closePopout() {
     debug_trunc('Popout closed');
 }
 
+// Toggle popout position lock
+function togglePopoutLock() {
+    if (!$POPOUT) return;
+    
+    POPOUT_LOCKED = !POPOUT_LOCKED;
+    
+    const $button = $POPOUT.find('.dragLock');
+    
+    if (POPOUT_LOCKED) {
+        $button.removeClass('fa-lock-open').addClass('fa-lock locked');
+        $button.attr('title', 'Unlock position');
+        $POPOUT.addClass('position-locked');
+        debug_trunc('Popout position locked');
+    } else {
+        $button.removeClass('fa-lock locked').addClass('fa-lock-open');
+        $button.attr('title', 'Lock position');
+        $POPOUT.removeClass('position-locked');
+        debug_trunc('Popout position unlocked');
+    }
+}
+
 // Fallback drag implementation if SillyTavern's dragElement is not available
 function make_popout_draggable($element) {
     const $header = $element.find('#ctPopoutHeader');
@@ -1899,8 +2133,11 @@ function make_popout_draggable($element) {
     let startX, startY, initialX, initialY;
     
     $header.on('mousedown', (e) => {
-        // Don't drag if clicking on close button or other interactive elements
-        if ($(e.target).hasClass('dragClose') || $(e.target).hasClass('hoverglow')) {
+        // Don't drag if locked
+        if (POPOUT_LOCKED) return;
+        
+        // Don't drag if clicking on close button, lock button, or other interactive elements
+        if ($(e.target).hasClass('dragClose') || $(e.target).hasClass('dragLock') || $(e.target).hasClass('hoverglow')) {
             return;
         }
         
@@ -2272,15 +2509,22 @@ function register_event_listeners() {
             CURRENT_QDRANT_MEMORIES = [];
             CURRENT_QDRANT_INJECTION = '';
             QDRANT_TOKEN_HISTORY = [];  // Reset Qdrant token history for new chat
+            
+            // Reset deletion tracking for new chat
+            DELETION_COUNT = 0;
         }
         currentChatId = newChatId;
+        
+        // Initialize chat snapshot for deletion/edit detection
+        snapshot_chat_state();
+        
         refresh_memory();
+        update_resilience_ui();
     });
     
-    // Reset when messages deleted
+    // Smart handling of message deletions
     eventSource.on(event_types.MESSAGE_DELETED, () => {
-        reset_truncation_index();
-        refresh_memory();
+        handle_message_deleted();
     });
     
     // Auto-summarize and auto-buffer on new character messages
@@ -2527,6 +2771,36 @@ function initialize_ui_listeners() {
         } else {
             $content.slideDown(200);
             $(this).addClass('expanded');
+        }
+    });
+    
+    // ==================== TOKEN COUNTS TOGGLE ====================
+    $('#ct_breakdown_toggle').on('click', function() {
+        const $details = $('#ct_breakdown_details');
+        const isExpanded = $details.is(':visible');
+        
+        if (isExpanded) {
+            $details.slideUp(200);
+            $(this).removeClass('expanded');
+            $(this).find('span').text('Show Token Counts');
+        } else {
+            $details.slideDown(200);
+            $(this).addClass('expanded');
+            $(this).find('span').text('Hide Token Counts');
+        }
+    });
+    
+    // ==================== FOLDABLE STATS CARDS ====================
+    $(document).on('click', '.ct_collapsible_toggle', function() {
+        const $card = $(this).closest('.ct_collapsible');
+        const isCollapsed = $card.attr('data-collapsed') === 'true';
+        
+        if (isCollapsed) {
+            $card.attr('data-collapsed', 'false');
+            $card.find('.ct_collapsible_content').slideDown(200);
+        } else {
+            $card.attr('data-collapsed', 'true');
+            $card.find('.ct_collapsible_content').slideUp(200);
         }
     });
     
