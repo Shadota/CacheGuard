@@ -3,7 +3,132 @@
     margin: 1em 0;
 }
 
-/* Status panel styling */
+/* ==================== TAB NAVIGATION ==================== */
+.ct_tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 15px;
+    border-bottom: 2px solid var(--SmartThemeBorderColor);
+    padding-bottom: 0;
+}
+
+.ct_tab {
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    background: var(--black30a);
+    color: var(--SmartThemeBodyColor);
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: -2px;
+}
+
+.ct_tab:hover {
+    background: var(--black50a);
+}
+
+.ct_tab_active {
+    background: var(--SmartThemeBlurTintColor);
+    border-color: var(--SmartThemeBorderColor);
+    color: var(--SmartThemeBodyColor);
+    font-weight: bold;
+}
+
+.ct_tab i {
+    font-size: 0.9em;
+    opacity: 0.8;
+}
+
+.ct_tab_active i {
+    opacity: 1;
+}
+
+/* ==================== TAB CONTENT ==================== */
+.ct_tab_content {
+    display: none;
+    animation: ct_fadeIn 0.2s ease;
+}
+
+.ct_tab_content_active {
+    display: block;
+}
+
+@keyframes ct_fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ==================== STATUS MESSAGES ==================== */
+.ct_status_message {
+    padding: 8px 12px;
+    border-radius: 5px;
+    font-size: 0.9em;
+    min-height: 20px;
+}
+
+.ct_status_success {
+    background: rgba(76, 175, 80, 0.2);
+    border: 1px solid rgba(76, 175, 80, 0.5);
+    color: #90ee90;
+}
+
+.ct_status_error {
+    background: rgba(244, 67, 54, 0.2);
+    border: 1px solid rgba(244, 67, 54, 0.5);
+    color: #ffaaaa;
+}
+
+.ct_status_warning {
+    background: rgba(255, 193, 7, 0.2);
+    border: 1px solid rgba(255, 193, 7, 0.5);
+    color: #ffff99;
+}
+
+.ct_status_info {
+    background: rgba(33, 150, 243, 0.2);
+    border: 1px solid rgba(33, 150, 243, 0.5);
+    color: #90caf9;
+}
+
+/* ==================== INFO BOX ==================== */
+.ct_info_box {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    background: rgba(33, 150, 243, 0.1);
+    border: 1px solid rgba(33, 150, 243, 0.3);
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.ct_info_box i {
+    color: #90caf9;
+    font-size: 1.1em;
+    margin-top: 2px;
+}
+
+.ct_info_box span {
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+/* ==================== DANGER BUTTON ==================== */
+.menu_button_danger {
+    background: rgba(244, 67, 54, 0.2) !important;
+    border-color: rgba(244, 67, 54, 0.5) !important;
+}
+
+.menu_button_danger:hover {
+    background: rgba(244, 67, 54, 0.4) !important;
+}
+
+/* ==================== STATUS PANEL ==================== */
 .ct_status_panel {
     background-color: var(--black30a);
     border-radius: 5px;
@@ -34,17 +159,695 @@
     border-bottom: none;
 }
 
-/* Inline settings */
+/* ==================== INLINE SETTINGS ==================== */
 #context_truncator_settings .inline_setting {
     width: 6em;
 }
 
-/* Button styling */
+/* ==================== BUTTON STYLING ==================== */
 #context_truncator_settings .menu_button i {
     margin-right: 0.5em;
 }
 
-/* Horizontal rules */
+/* ==================== HORIZONTAL RULES ==================== */
 #context_truncator_settings hr {
     margin: 1em 0;
+    border-color: var(--SmartThemeBorderColor);
+    opacity: 0.3;
+}
+
+/* ==================== RANGE INPUTS ==================== */
+#context_truncator_settings input[type="range"] {
+    width: 100%;
+    margin-top: 5px;
+}
+
+/* ==================== QDRANT SPECIFIC ==================== */
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] h4,
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] .flex-container:not(:first-child) {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.ct_qdrant_disabled .ct_tab_content[data-tab="qdrant"] .flex-container:first-child {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Connection status indicator */
+.ct_connection_indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+}
+
+.ct_connection_indicator.connected {
+    background: #4caf50;
+    box-shadow: 0 0 5px #4caf50;
+}
+
+.ct_connection_indicator.disconnected {
+    background: #f44336;
+    box-shadow: 0 0 5px #f44336;
+}
+
+.ct_connection_indicator.unknown {
+    background: #9e9e9e;
+}
+
+/* ==================== CALIBRATION PANEL ==================== */
+.ct_calibration_panel {
+    background: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    margin-top: 10px;
+    overflow: hidden;
+}
+
+.ct_calibration_header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--black50a);
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.ct_calibration_header i {
+    color: #90caf9;
+}
+
+.ct_calibration_content {
+    padding: 10px 12px;
+}
+
+.ct_calibration_row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.ct_calibration_row:last-child {
+    border-bottom: none;
+}
+
+.ct_calibration_label {
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+.ct_calibration_value {
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+/* Calibration phase colors */
+.ct_phase_training {
+    color: #ffcc00;
+}
+
+.ct_phase_calibrating {
+    color: #ff9800;
+}
+
+.ct_phase_retraining {
+    color: #2196f3;
+}
+
+.ct_phase_stable {
+    color: #4caf50;
+}
+
+/* ==================== MEMORY DISPLAY PANEL ==================== */
+.ct_memory_panel {
+    background: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.ct_memory_panel_header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--black50a);
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.ct_memory_panel_header:hover {
+    background: var(--black70a);
+}
+
+.ct_memory_panel_header i:first-child {
+    color: #ce93d8;
+    margin-right: 8px;
+}
+
+.ct_memory_toggle_icon {
+    transition: transform 0.2s ease;
+    opacity: 0.6;
+}
+
+.ct_memory_panel_header.expanded .ct_memory_toggle_icon {
+    transform: rotate(180deg);
+}
+
+.ct_memory_panel_content {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.ct_memory_empty {
+    padding: 15px;
+    text-align: center;
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.ct_memory_item {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    transition: background 0.2s ease;
+}
+
+.ct_memory_item:last-child {
+    border-bottom: none;
+}
+
+.ct_memory_item:hover {
+    background: var(--black50a);
+}
+
+.ct_memory_item_header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.ct_memory_score {
+    font-size: 0.85em;
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--black50a);
+}
+
+/* Score color coding */
+.ct_score_high {
+    background: rgba(76, 175, 80, 0.3) !important;
+    color: #90ee90;
+}
+
+.ct_score_medium {
+    background: rgba(255, 193, 7, 0.3) !important;
+    color: #ffff99;
+}
+
+.ct_score_low {
+    background: rgba(158, 158, 158, 0.3) !important;
+    color: #cccccc;
+}
+
+.ct_memory_meta {
+    font-size: 0.8em;
+    opacity: 0.7;
+}
+
+.ct_memory_text {
+    font-size: 0.9em;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 100px;
+    overflow-y: auto;
+    padding: 8px;
+    background: var(--black30a);
+    border-radius: 4px;
+    margin-top: 6px;
+}
+
+/* ==================== DISABLED INPUT STATE ==================== */
+.ct_disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: var(--black50a) !important;
+}
+
+/* ==================== OVERVIEW TAB ==================== */
+.ct_overview_section {
+    margin-bottom: 15px;
+}
+
+.ct_overview_section h4 {
+    margin: 0 0 10px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.95em;
+}
+
+.ct_overview_section h4 i {
+    opacity: 0.8;
+}
+
+/* ==================== CONTEXT GAUGE ==================== */
+.ct_gauge_container {
+    background: var(--black30a);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.ct_gauge_bar {
+    height: 24px;
+    background: var(--black50a);
+    border-radius: 12px;
+    overflow: hidden;
+    position: relative;
+}
+
+.ct_gauge_fill {
+    height: 100%;
+    transition: width 0.3s ease, background-color 0.3s ease;
+    border-radius: 12px;
+}
+
+.ct_gauge_green {
+    background: linear-gradient(90deg, #2d5016, #4caf50);
+}
+
+.ct_gauge_yellow {
+    background: linear-gradient(90deg, #4a4a00, #ffcc00);
+}
+
+.ct_gauge_red {
+    background: linear-gradient(90deg, #4a0000, #f44336);
+}
+
+.ct_gauge_markers {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+}
+
+.ct_gauge_marker {
+    position: absolute;
+    top: 50%;
+    transform: translateX(-50%) translateY(-50%);
+    font-size: 0.7em;
+    opacity: 0.5;
+    color: #fff;
+    text-shadow: 0 0 3px rgba(0,0,0,0.8);
+}
+
+.ct_gauge_labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 0.9em;
+}
+
+.ct_gauge_labels span:first-child {
+    font-weight: bold;
+    font-size: 1.2em;
+}
+
+.ct_gauge_labels span:last-child {
+    opacity: 0.7;
+}
+
+/* ==================== CONTEXT BREAKDOWN BAR ==================== */
+.ct_breakdown_container {
+    background: var(--black30a);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.ct_breakdown_bar {
+    height: 20px;
+    background: var(--black50a);
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex;
+}
+
+.ct_breakdown_segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.ct_breakdown_chat {
+    background: #4fc3f7;
+}
+
+.ct_breakdown_system {
+    background: #81c784;
+}
+
+.ct_breakdown_summaries {
+    background: #ffb74d;
+}
+
+.ct_breakdown_qdrant {
+    background: #ce93d8;
+}
+
+.ct_breakdown_free {
+    background: var(--black30a);
+}
+
+.ct_breakdown_legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 10px;
+    font-size: 0.85em;
+}
+
+.ct_legend_item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.ct_legend_color {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+}
+
+/* ==================== STATS CARDS GRID ==================== */
+.ct_stats_grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 15px;
+}
+
+.ct_stats_card {
+    background: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.ct_card_header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--black50a);
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.ct_card_header i {
+    opacity: 0.8;
+}
+
+.ct_card_content {
+    padding: 10px 12px;
+}
+
+.ct_stat_row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    font-size: 0.85em;
+}
+
+.ct_stat_row:last-child {
+    border-bottom: none;
+}
+
+.ct_stat_label {
+    opacity: 0.7;
+}
+
+.ct_stat_value {
+    font-weight: bold;
+}
+
+/* ==================== QUICK ACTIONS ==================== */
+.ct_quick_actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.ct_quick_actions .menu_button {
+    flex: 1;
+    min-width: 120px;
+}
+
+/* ==================== POPOUT WINDOW ==================== */
+#ct_popout {
+    position: fixed;
+    top: var(--topBarBlockSize, 50px);
+    right: 10px;
+    width: 420px;
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vh - var(--topBarBlockSize, 50px) - 20px);
+    overflow: hidden;
+    background-color: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    z-index: 10000;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Popout control bar (header) */
+#ct_popout .panelControlBar {
+    padding: 10px 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    font-weight: 500;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    background: var(--SmartThemeBlurTintColor);
+    cursor: grab;
+    z-index: 1;
+}
+
+#ct_popout .panelControlBar:active {
+    cursor: grabbing;
+}
+
+#ct_popout .panelControlBar .title {
+    font-size: 1em;
+    font-weight: bold;
+}
+
+#ct_popout .panelControlBar .fa-chart-pie {
+    color: #90caf9;
+}
+
+#ct_popout .panelControlBar .flex1 {
+    flex: 1;
+}
+
+/* Drag grabber icon */
+#ct_popout .drag-grabber {
+    cursor: grab;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+#ct_popout .drag-grabber:hover {
+    opacity: 1;
+}
+
+#ct_popout .drag-grabber:active {
+    cursor: grabbing;
+}
+
+/* Close button */
+#ct_popout .dragClose {
+    cursor: pointer;
+    padding: 5px 10px;
+    color: var(--SmartThemeBodyColor);
+    opacity: 0.6;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#ct_popout .dragClose:hover {
+    color: #ff6b6b;
+    opacity: 1;
+}
+
+/* Hover glow effect */
+#ct_popout .hoverglow:hover {
+    filter: brightness(1.2);
+}
+
+/* Content container */
+#ct_popout_content_container {
+    padding: 0;
+    max-height: calc(100vh - var(--topBarBlockSize, 50px) - 80px);
+    overflow-y: auto;
+}
+
+#ct_popout_content_container .inline-drawer-content {
+    padding: 15px;
+}
+
+/* ==================== POPOUT TOGGLE BUTTON ==================== */
+#ct_popout_button {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#ct_popout_button:hover {
+    opacity: 1;
+}
+
+#ct_popout_button.active {
+    color: #90caf9;
+    opacity: 1;
+}
+
+/* Header controls wrapper */
+.ct_header_controls {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* Fix drawer header for popout button */
+#context_truncator_settings .inline-drawer-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+}
+
+#context_truncator_settings .inline-drawer-header b {
+    flex: 0 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ==================== RESPONSIVE POPOUT ==================== */
+@media screen and (max-width: 500px) {
+    #ct_popout {
+        width: calc(100vw - 20px);
+        right: 10px;
+        left: 10px;
+    }
+}
+
+@media screen and (max-height: 600px) {
+    #ct_popout {
+        max-height: calc(100vh - var(--topBarBlockSize, 50px) - 10px);
+    }
+    
+    #ct_popout_content_container {
+        max-height: calc(100vh - var(--topBarBlockSize, 50px) - 60px);
+    }
+}
+
+/* ==================== PREDICTION DISCLAIMER ==================== */
+.ct_prediction_disclaimer {
+    font-size: 0.75em;
+    opacity: 0.6;
+    font-style: italic;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--SmartThemeBorderColor);
+    text-align: center;
+}
+
+/* ==================== TEXT COLOR HELPERS ==================== */
+.ct_text_green {
+    color: #4caf50;
+}
+
+.ct_text_yellow {
+    color: #ffcc00;
+}
+
+.ct_text_orange {
+    color: #ff9800;
+}
+
+.ct_text_blue {
+    color: #2196f3;
+}
+
+.ct_text_gray {
+    color: #9e9e9e;
+}
+
+/* ==================== SUMMARIZATION PROGRESS BAR ==================== */
+.ct_sum_progress_container {
+    margin-bottom: 10px;
+}
+
+.ct_sum_progress_bar {
+    height: 16px;
+    background: var(--black50a);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+}
+
+.ct_sum_bar_segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+/* Summarization status colors */
+.ct_sum_done {
+    background: #4caf50;
+}
+
+.ct_sum_pending {
+    background: #ffcc00;
+}
+
+.ct_sum_queue {
+    background: #ff9800;
+}
+
+.ct_sum_active {
+    background: #2196f3;
+}
+
+.ct_sum_na {
+    background: #9e9e9e;
+}
+
+/* ==================== SUMMARIZATION LEGEND ==================== */
+.ct_sum_legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 0.8em;
+}
+
+.ct_sum_legend_item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ct_legend_dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
 }
