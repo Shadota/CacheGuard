@@ -1692,14 +1692,21 @@ function update_overview_tab() {
         $('#ct_breakdown_free_tokens').text(`${freeTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_total_tokens').html(`<strong>${actualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
         
-        // Update Truncation Stats Card
+        // Update Truncation Stats Card (now simplified)
         const targetSize = get_settings('target_context_size');
         const difference = actualSize - targetSize;
         const percentError = Math.abs((difference / targetSize) * 100);
         
+        // Simplified context display (actual / target)
+        $('#ct_ov_actual_size_short').text(actualSize.toLocaleString());
+        $('#ct_ov_target_size_short').text(targetSize.toLocaleString());
+        
+        // Legacy element support (for any remaining references)
         $('#ct_ov_actual_size').text(`${actualSize.toLocaleString()} tokens`);
         $('#ct_ov_target_size').text(`${targetSize.toLocaleString()} tokens`);
-        $('#ct_ov_difference').text(`${difference > 0 ? '+' : ''}${difference.toLocaleString()} tokens`);
+        
+        // Advanced stats (in collapsible section)
+        $('#ct_ov_difference').text(`${difference > 0 ? '+' : ''}${difference.toLocaleString()}`);
         $('#ct_ov_error').text(`${percentError.toFixed(1)}%`);
         $('#ct_ov_trunc_index').text(TRUNCATION_INDEX !== null ? TRUNCATION_INDEX : '--');
         $('#ct_ov_correction').text(CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3));
@@ -2637,6 +2644,11 @@ function register_event_listeners() {
         
         refresh_memory();
         update_resilience_ui();
+        
+        // Update UI with loaded state immediately (don't wait for generation)
+        update_overview_tab();
+        update_calibration_ui();
+        update_summary_stats_display();
     });
     
     // Smart handling of message deletions
@@ -2734,17 +2746,15 @@ function initialize_ui_listeners() {
     // ==================== TRUNCATION SETTINGS ====================
     bind_setting('#ct_enabled', 'enabled', 'boolean');
     bind_setting('#ct_target_size', 'target_context_size', 'number');
-    bind_setting('#ct_min_keep', 'min_messages_to_keep', 'number');
     bind_setting('#ct_auto_summarize', 'auto_summarize', 'boolean');
     bind_setting('#ct_connection_profile', 'connection_profile', 'text');
-    bind_setting('#ct_max_words', 'summary_max_words', 'number');
     
     // Per-module debug settings
     bind_setting('#ct_debug_truncation', 'debug_truncation', 'boolean');
     
-    // Batch size - reset truncation when changed
-    $('#ct_batch_size').val(get_settings('batch_size'));
-    $('#ct_batch_size').on('change', function() {
+    // Batch size (now a slider) - reset truncation when changed
+    bind_range_setting('#ct_batch_size', 'batch_size', '#ct_batch_size_display');
+    $('#ct_batch_size').off('change').on('change', function() {
         const value = Number($(this).val());
         debug(`Setting [batch_size] changed to [${value}]`);
         set_settings('batch_size', value);
@@ -2752,6 +2762,12 @@ function initialize_ui_listeners() {
         toastr.info('Batch size changed - truncation reset', MODULE_NAME_FANCY);
         refresh_memory();
     });
+    
+    // Min messages (now a slider)
+    bind_range_setting('#ct_min_keep', 'min_messages_to_keep', '#ct_min_keep_display');
+    
+    // Max words per summary (now a slider)
+    bind_range_setting('#ct_max_words', 'summary_max_words', '#ct_max_words_display');
     
     // Initialize connection profile dropdown
     update_connection_profile_dropdown();
@@ -2918,6 +2934,75 @@ function initialize_ui_listeners() {
             $details.slideDown(200);
             $(this).addClass('expanded');
             $(this).find('span').text('Hide Token Counts');
+        }
+    });
+    
+    // ==================== ADVANCED STATS TOGGLE (Overview) ====================
+    $('#ct_advanced_toggle').on('click', function() {
+        const $content = $('#ct_advanced_content');
+        const isExpanded = $content.is(':visible');
+        
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
+        }
+    });
+    
+    // ==================== ADVANCED SETTINGS TOGGLE (Truncation Tab) ====================
+    $('#ct_trunc_advanced_toggle').on('click', function() {
+        const $content = $('#ct_trunc_advanced_content');
+        const isExpanded = $content.is(':visible');
+        
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
+        }
+    });
+    
+    // ==================== ADVANCED SETTINGS TOGGLE (Qdrant Tab) ====================
+    $('#ct_qdrant_advanced_toggle').on('click', function() {
+        const $content = $('#ct_qdrant_advanced_content');
+        const isExpanded = $content.is(':visible');
+        
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
+        }
+    });
+    
+    // ==================== SYNERGY TAB TOGGLES ====================
+    $('#ct_synergy_info_toggle').on('click', function() {
+        const $content = $('#ct_synergy_info_content');
+        const isExpanded = $content.is(':visible');
+        
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
+        }
+    });
+    
+    $('#ct_synergy_advanced_toggle').on('click', function() {
+        const $content = $('#ct_synergy_advanced_content');
+        const isExpanded = $content.is(':visible');
+        
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
         }
     });
     

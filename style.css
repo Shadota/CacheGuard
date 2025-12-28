@@ -1028,3 +1028,358 @@
     box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
     pointer-events: none;
 }
+
+/* ==================== TOOLTIP SYSTEM ==================== */
+.ct_tooltip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: help;
+}
+
+.ct_info_icon {
+    font-size: 0.8em;
+    opacity: 0.4;
+    margin-left: 5px;
+    color: var(--SmartThemeQuoteColor);
+    transition: opacity 0.2s ease;
+}
+
+.ct_tooltip:hover .ct_info_icon {
+    opacity: 1;
+}
+
+.ct_tooltip_text {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    z-index: 1000;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 8px 12px;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    font-size: 0.8em;
+    font-weight: normal;
+    font-style: normal;
+    max-width: 280px;
+    min-width: 150px;
+    white-space: normal;
+    text-align: left;
+    line-height: 1.4;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+}
+
+.ct_tooltip:hover .ct_tooltip_text {
+    visibility: visible;
+    opacity: 1;
+}
+
+/* Tooltip arrow */
+.ct_tooltip_text::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -6px;
+    border-width: 6px;
+    border-style: solid;
+    border-color: var(--SmartThemeBorderColor) transparent transparent transparent;
+}
+
+/* Tooltip positioning variants */
+.ct_tooltip_right .ct_tooltip_text {
+    left: auto;
+    right: 0;
+    transform: none;
+}
+
+.ct_tooltip_right .ct_tooltip_text::after {
+    left: auto;
+    right: 15px;
+}
+
+.ct_tooltip_left .ct_tooltip_text {
+    left: 0;
+    transform: none;
+}
+
+.ct_tooltip_left .ct_tooltip_text::after {
+    left: 15px;
+}
+
+/* ==================== COMPACT SLIDER COMPONENT ==================== */
+.ct_compact_setting {
+    margin-bottom: 14px;
+}
+
+.ct_setting_header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+    font-size: 0.9em;
+}
+
+.ct_setting_label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ct_setting_value {
+    font-weight: bold;
+    color: var(--SmartThemeQuoteColor);
+    min-width: 45px;
+    text-align: right;
+    font-size: 0.95em;
+}
+
+.ct_compact_slider {
+    width: 100%;
+    height: 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--black50a);
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+}
+
+.ct_compact_slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    background: var(--SmartThemeQuoteColor);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.1s ease;
+}
+
+.ct_compact_slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+.ct_compact_slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    background: var(--SmartThemeQuoteColor);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+}
+
+/* ==================== COMPACT CHECKBOX COMPONENT ==================== */
+.ct_compact_checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 0.9em;
+}
+
+.ct_compact_checkbox input[type="checkbox"] {
+    margin: 0;
+}
+
+.ct_compact_checkbox .ct_info_icon {
+    margin-left: auto;
+}
+
+/* ==================== COMPACT INPUT COMPONENT ==================== */
+.ct_compact_input {
+    margin-bottom: 14px;
+}
+
+.ct_compact_input label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 4px;
+    font-size: 0.9em;
+}
+
+.ct_compact_input input,
+.ct_compact_input select {
+    width: 100%;
+    padding: 6px 10px;
+    font-size: 0.9em;
+}
+
+/* ==================== ADVANCED SECTION TOGGLE ==================== */
+.ct_advanced_toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+    opacity: 0.8;
+    transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.ct_advanced_toggle:hover {
+    opacity: 1;
+    background: var(--black50a);
+}
+
+.ct_advanced_toggle i:first-child {
+    margin-right: 8px;
+    opacity: 0.7;
+}
+
+.ct_advanced_toggle i:last-child {
+    transition: transform 0.2s ease;
+}
+
+.ct_advanced_toggle.expanded i:last-child {
+    transform: rotate(180deg);
+}
+
+.ct_advanced_content {
+    margin-top: 10px;
+    padding: 12px;
+    background: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.ct_advanced_grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+}
+
+.ct_advanced_item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    background: var(--black50a);
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+.ct_advanced_label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0.8;
+}
+
+.ct_advanced_value {
+    font-weight: bold;
+}
+
+/* ==================== SIMPLIFIED STATS CARD ==================== */
+.ct_stats_grid_compact {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+}
+
+.ct_stats_grid_compact .ct_stats_card {
+    min-height: auto;
+}
+
+.ct_stats_grid_compact .ct_card_content {
+    padding: 8px 10px;
+}
+
+.ct_stats_grid_compact .ct_stat_row {
+    padding: 3px 0;
+    font-size: 0.85em;
+}
+
+/* ==================== SECTION DIVIDER ==================== */
+.ct_section_divider {
+    margin: 15px 0;
+    border: none;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    opacity: 0.3;
+}
+
+/* ==================== SECTION HEADER ==================== */
+.ct_section_header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 15px 0 10px 0;
+    font-size: 0.95em;
+    font-weight: bold;
+    opacity: 0.9;
+}
+
+.ct_section_header i {
+    opacity: 0.7;
+}
+
+/* ==================== BUTTON ROW ==================== */
+.ct_button_row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.ct_button_row .menu_button {
+    flex: 1;
+    min-width: 100px;
+    padding: 8px 12px;
+    font-size: 0.85em;
+}
+
+/* ==================== SIMPLIFIED OVERVIEW STYLES ==================== */
+#ct_ov_phase {
+    text-transform: capitalize;
+}
+
+/* Combined context display */
+.ct_context_combined {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}
+
+.ct_context_combined .ct_actual {
+    font-weight: bold;
+}
+
+.ct_context_combined .ct_separator {
+    opacity: 0.5;
+}
+
+.ct_context_combined .ct_target {
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+/* ==================== INFO LIST (For Synergy Tab) ==================== */
+.ct_info_list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ct_info_item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 10px;
+    background: var(--black50a);
+    border-radius: 6px;
+    font-size: 0.85em;
+    line-height: 1.4;
+}
+
+.ct_info_number {
+    color: var(--SmartThemeQuoteColor);
+    opacity: 0.7;
+    min-width: 16px;
+    font-weight: bold;
+}
