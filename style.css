@@ -624,6 +624,7 @@
     top: var(--topBarBlockSize, 50px);
     right: 10px;
     width: 900px;
+    min-width: 400px;
     max-width: calc(100vw - 20px);
     max-height: calc(100vh - var(--topBarBlockSize, 50px) - 20px);
     overflow: hidden;
@@ -632,6 +633,7 @@
     border-radius: 10px;
     z-index: 10000;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    resize: horizontal;
 }
 
 /* Popout control bar (header) */
@@ -705,7 +707,7 @@
 #ct_popout_content_container {
     padding: 0;
     max-height: calc(100vh - var(--topBarBlockSize, 50px) - 80px);
-    overflow-y: auto;
+    overflow: auto;
 }
 
 #ct_popout_content_container .inline-drawer-content {
@@ -728,26 +730,16 @@
     opacity: 1;
 }
 
-/* Header controls wrapper */
+/* Header controls wrapper - kept for backwards compatibility but no longer used */
 .ct_header_controls {
     display: flex;
     align-items: center;
     gap: 5px;
 }
 
-/* Fix drawer header for popout button */
-#context_truncator_settings .inline-drawer-header {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: space-between !important;
-}
-
-#context_truncator_settings .inline-drawer-header b {
-    flex: 0 1 auto;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+/* NOTE: Removed !important overrides on .inline-drawer-header to preserve
+   SillyTavern's drawer toggle functionality. The popout button now uses
+   simple insertion with insertBefore() instead of restructuring the header. */
 
 /* ==================== RESPONSIVE POPOUT ==================== */
 @media screen and (max-width: 500px) {
@@ -1000,6 +992,19 @@
 #ct_popout.position-locked .drag-grabber {
     opacity: 0.3;
     cursor: not-allowed;
+}
+
+/* ==================== POPOUT RESET SIZE BUTTON ==================== */
+#ct_popout .dragReset {
+    cursor: pointer;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#ct_popout .dragReset:hover {
+    opacity: 1;
+    color: #90caf9;
 }
 
 /* ==================== CONTEXT GAUGE TICK MARKS ==================== */

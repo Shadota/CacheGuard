@@ -2088,13 +2088,14 @@ function openPopout() {
         $drawerHeader.trigger('click');
     }
     
-    // Create the popout element
+    // Create the popout element with reset size button
     $POPOUT = $(`
         <div id="ct_popout" class="draggable" style="display: none;">
             <div class="panelControlBar flex-container" id="ctPopoutHeader">
                 <div class="fa-solid fa-chart-pie" style="margin-right: 10px;"></div>
                 <div class="title">${MODULE_NAME_FANCY}</div>
                 <div class="flex1"></div>
+                <div class="fa-solid fa-arrows-left-right hoverglow dragReset" title="Reset to default size"></div>
                 <div class="fa-solid fa-grip drag-grabber hoverglow" title="Drag to move"></div>
                 <div class="fa-solid fa-lock-open hoverglow dragLock" title="Lock position"></div>
                 <div class="fa-solid fa-circle-xmark hoverglow dragClose" title="Close"></div>
@@ -2133,11 +2134,29 @@ function openPopout() {
     // Load saved position if available
     load_popout_position();
     
-    // Set up close button handler
+    // Set up button handlers
     $POPOUT.find('.dragClose').on('click', () => closePopout());
-    
-    // Set up lock button handler
     $POPOUT.find('.dragLock').on('click', () => togglePopoutLock());
+    $POPOUT.find('.dragReset').on('click', () => resetPopoutSize());
+    
+    // Set up ResizeObserver to track when user manually resizes
+    try {
+        const resizeObserver = new ResizeObserver(debounce((entries) => {
+            for (const entry of entries) {
+                // Mark that user has manually resized
+                $POPOUT.data('user-resized', true);
+                save_popout_position();
+                debug_trunc('Popout resized by user');
+            }
+        }, 250));
+        resizeObserver.observe($POPOUT[0]);
+        
+        // Store observer reference for cleanup
+        $POPOUT.data('resize-observer', resizeObserver);
+        debug_trunc('ResizeObserver attached to popout');
+    } catch (e) {
+        debug_trunc('ResizeObserver not available:', e);
+    }
     
     // Show the popout with animation
     $POPOUT.fadeIn(250);
@@ -2158,6 +2177,13 @@ function closePopout() {
     
     // Save position before closing
     save_popout_position();
+    
+    // Cleanup ResizeObserver
+    const resizeObserver = $currentPopout.data('resize-observer');
+    if (resizeObserver) {
+        resizeObserver.disconnect();
+        debug_trunc('ResizeObserver disconnected');
+    }
     
     $currentPopout.fadeOut(250, () => {
         const $drawer = $('#context_truncator_settings');
@@ -2273,6 +2299,7 @@ function make_popout_draggable($element) {
 }
 
 // Save popout position to localStorage
+// FIXED: Only saves width if user has manually resized the popout
 function save_popout_position() {
     if (!$POPOUT) return;
     
@@ -2280,7 +2307,8 @@ function save_popout_position() {
         left: $POPOUT.css('left'),
         top: $POPOUT.css('top'),
         right: $POPOUT.css('right'),
-        width: $POPOUT.css('width'),
+        // Only save width if user has manually resized (avoids overriding CSS defaults)
+        width: $POPOUT.data('user-resized') ? $POPOUT.css('width') : null,
         locked: POPOUT_LOCKED
     };
     
@@ -2302,8 +2330,11 @@ function load_popout_position() {
                 top: position.top || 'var(--topBarBlockSize, 50px)',
                 right: position.right || 'auto'
             });
+            
+            // Only apply saved width if it exists (user previously resized)
             if (position.width) {
                 $POPOUT.css('width', position.width);
+                $POPOUT.data('user-resized', true);
             }
             
             // Restore lock state
@@ -2317,6 +2348,18 @@ function load_popout_position() {
             debug_trunc('Failed to load popout position:', e);
         }
     }
+}
+
+// Reset popout size to CSS default
+function resetPopoutSize() {
+    if (!$POPOUT) return;
+    
+    $POPOUT.css('width', '');  // Remove inline width, use CSS default
+    $POPOUT.data('user-resized', false);
+    save_popout_position();
+    
+    toastr.info('Popout size reset to default', MODULE_NAME_FANCY);
+    debug_trunc('Popout size reset to default');
 }
 
 // Update the popout toggle button appearance
@@ -2334,6 +2377,7 @@ function update_popout_button_state() {
 }
 
 // Add popout toggle button to the drawer header
+// FIXED: Uses minimal insertion to preserve SillyTavern's drawer toggle functionality
 function add_popout_button() {
     const $header = $('#context_truncator_settings .inline-drawer-header');
     if ($header.length === 0) {
@@ -2356,55 +2400,34 @@ function add_popout_button() {
         </i>
     `);
     
-    // Style the button
+    // Style the button (positioned with margin-left: auto to push to right)
     $button.css({
-        'margin-left': '5px',
+        'margin-left': 'auto',
+        'margin-right': '10px',
         'display': 'inline-flex',
         'vertical-align': 'middle',
         'cursor': 'pointer',
         'font-size': '1em'
     });
     
-    // Click handler
+    // Click handler with stopPropagation to prevent drawer toggle
     $button.on('click', (event) => {
-        togglePopout();
         event.stopPropagation();
+        event.preventDefault();
+        togglePopout();
     });
     
-    // Fix header layout for proper flex display
-    $header.css({
-        'display': 'flex',
-        'align-items': 'center',
-        'justify-content': 'space-between'
-    });
-    
-    // Find the title (b tag) and style it
-    const $title = $header.find('b');
-    $title.css({
-        'flex': '0 1 auto',
-        'white-space': 'nowrap',
-        'overflow': 'hidden',
-        'text-overflow': 'ellipsis'
-    });
-    
-    // Create a flex wrapper for the icon
-    const $iconWrapper = $('<div class="ct_header_controls"></div>');
-    $iconWrapper.css({
-        'display': 'flex',
-        'align-items': 'center',
-        'gap': '5px'
-    });
-    
-    // Move the chevron icon to the wrapper
+    // SIMPLE INSERTION: Insert button BEFORE the chevron icon
+    // This avoids detaching/restructuring anything and preserves SillyTavern's event handlers
     const $chevron = $header.find('.inline-drawer-icon');
-    $chevron.detach();
-    $iconWrapper.append($button);
-    $iconWrapper.append($chevron);
+    if ($chevron.length > 0) {
+        $button.insertBefore($chevron);
+    } else {
+        // Fallback: append to header
+        $header.append($button);
+    }
     
-    // Add wrapper to header
-    $header.append($iconWrapper);
-    
-    debug_trunc('Popout button added to header');
+    debug_trunc('Popout button added to header (minimal insertion)');
 }
 
 // ==================== MEMORY DISPLAY ====================
