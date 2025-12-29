@@ -138,6 +138,10 @@ let POPOUT_LOCKED = false;
 let $POPOUT = null;
 let $DRAWER_CONTENT = null;
 
+// Indexing state (for Qdrant)
+let INDEXING_ACTIVE = false;
+let INDEXING_STOPPED = false;
+
 // Calibration state machine
 // States: WAITING -> INITIAL_TRAINING -> CALIBRATING -> RETRAINING -> STABLE
 let CALIBRATION_STATE = 'WAITING';
@@ -1590,13 +1594,14 @@ function update_calibration_ui() {
 // ==================== OVERVIEW TAB FUNCTIONS ====================
 
 // Calculate World Rules tokens from raw prompt
-// World Rules are bounded by "## Lore:" and "## {{user}}'s Persona:" (flexible matching)
+// World Rules are bounded by "## Lore:" and "## [AnyName]'s Persona:" (flexible matching)
 function calculate_world_rules_tokens(raw_prompt) {
     if (!raw_prompt) return 0;
     
     // Use flexible regex patterns to handle variations in spacing/formatting
     const lorePattern = /##\s*Lore:/i;
-    const personaPattern = /##\s*\{\{user\}\}'s Persona:/i;
+    // Match any name followed by "'s Persona:" - the name is replaced from {{user}} placeholder
+    const personaPattern = /##\s*.+?'s Persona:/i;
     
     const loreMatch = raw_prompt.match(lorePattern);
     if (!loreMatch) return 0;
@@ -2516,8 +2521,8 @@ class SummaryQueue {
             this.queue.push(index);
         }
         
-        // Show stop button, hide summarize button
-        this.updateStopButtonVisibility(true);
+        // Transform button to active/stop state
+        this.updateButtonState(true);
         
         if (!this.active) {
             await this.process();
@@ -2535,19 +2540,29 @@ class SummaryQueue {
         toastr.warning('Summarization stopped', MODULE_NAME_FANCY);
     }
     
-    // Update stop button visibility
-    updateStopButtonVisibility(showStop) {
-        if (showStop) {
-            $('#ct_stop_summarize, #ct_ov_stop_summarize').show();
-            $('#ct_summarize_all, #ct_ov_summarize').hide();
+    // Transform button to active/inactive state
+    updateButtonState(isActive) {
+        const $buttons = $('#ct_summarize_all, #ct_ov_summarize');
+        
+        if (isActive) {
+            $buttons.addClass('ct_active');
+            $buttons.find('i').removeClass('fa-compress').addClass('fa-stop');
+            $buttons.find('span').text('Stop');
+            $buttons.attr('title', 'Stop the current summarization');
         } else {
-            $('#ct_stop_summarize, #ct_ov_stop_summarize').hide();
-            $('#ct_summarize_all, #ct_ov_summarize').show();
+            $buttons.removeClass('ct_active');
+            $buttons.find('i').removeClass('fa-stop').addClass('fa-compress');
+            $buttons.find('span').text('Summarize All');
+            $buttons.attr('title', 'Summarize all messages without summaries');
         }
     }
     
     async process() {
         this.active = true;
+        
+        // Update stats at start of processing
+        update_summary_stats_display();
+        update_overview_tab();
         
         while (this.queue.length > 0 && !this.stopped) {
             const index = this.queue.shift();
@@ -2555,13 +2570,18 @@ class SummaryQueue {
             
             // Update stats display after each message
             update_summary_stats_display();
+            update_overview_tab();
         }
         
         this.active = false;
         this.stopped = false;
         
-        // Hide stop button, show summarize button
-        this.updateStopButtonVisibility(false);
+        // Final update after processing completes
+        update_summary_stats_display();
+        update_overview_tab();
+        
+        // Transform button back to normal state
+        this.updateButtonState(false);
     }
     
     async summarize_message(index) {
@@ -2813,14 +2833,21 @@ function initialize_ui_listeners() {
     // Initialize connection profile dropdown
     update_connection_profile_dropdown();
     
-    // Reset button
-    $('#ct_reset').on('click', () => {
+    // Reset All button (combines reset truncation + reset calibration)
+    $('#ct_reset_all').on('click', () => {
         reset_truncation_index();
-        toastr.info('Truncation index reset', MODULE_NAME_FANCY);
+        reset_calibration();
+        toastr.info('Reset complete - truncation and calibration cleared', MODULE_NAME_FANCY);
     });
     
-    // Summarize all button
+    // Summarize all button (toggles between start and stop)
     $('#ct_summarize_all').on('click', async () => {
+        // If already active, stop
+        if (summaryQueue.active) {
+            summaryQueue.stop();
+            return;
+        }
+        
         const ctx = getContext();
         const chat = ctx.chat;
         const indexes = [];
@@ -2838,11 +2865,6 @@ function initialize_ui_listeners() {
         } else {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
-    });
-    
-    // Stop summarize button
-    $('#ct_stop_summarize').on('click', () => {
-        summaryQueue.stop();
     });
     
     // ==================== AUTO-CALIBRATION SETTINGS ====================
@@ -2906,7 +2928,14 @@ function initialize_ui_listeners() {
     // Qdrant action buttons
     $('#ct_qdrant_test').on('click', test_qdrant_connection);
     $('#ct_test_embedding').on('click', test_embedding);
-    $('#ct_index_chats').on('click', index_current_chat);
+    // Index button toggles between start and stop
+    $('#ct_index_chats').on('click', () => {
+        if (INDEXING_ACTIVE) {
+            stop_indexing();
+        } else {
+            index_current_chat();
+        }
+    });
     $('#ct_delete_collection').on('click', delete_current_collection);
     
     // Memory panel toggle
@@ -2924,16 +2953,20 @@ function initialize_ui_listeners() {
     bind_setting('#ct_debug_synergy', 'debug_synergy', 'boolean');
     
     // ==================== OVERVIEW TAB QUICK ACTIONS ====================
-    $('#ct_ov_reset').on('click', () => {
+    $('#ct_ov_reset_all').on('click', () => {
         reset_truncation_index();
-        toastr.info('Truncation index reset', MODULE_NAME_FANCY);
-    });
-    
-    $('#ct_ov_recalibrate').on('click', () => {
         reset_calibration();
+        toastr.info('Reset complete - truncation and calibration cleared', MODULE_NAME_FANCY);
     });
     
+    // Overview summarize button (toggles between start and stop)
     $('#ct_ov_summarize').on('click', async () => {
+        // If already active, stop
+        if (summaryQueue.active) {
+            summaryQueue.stop();
+            return;
+        }
+        
         const ctx = getContext();
         const chat = ctx.chat;
         const indexes = [];
@@ -2951,11 +2984,6 @@ function initialize_ui_listeners() {
         } else {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
-    });
-    
-    // Stop summarize button (Overview tab)
-    $('#ct_ov_stop_summarize').on('click', () => {
-        summaryQueue.stop();
     });
     
     // Overview memory panel toggle
@@ -3355,6 +3383,32 @@ async function clear_current_memories() {
     } catch (e) {
         toastr.error(`Failed to clear memories: ${e.message}`, MODULE_NAME_FANCY);
         error('Failed to clear memories:', e);
+    }
+}
+
+// Stop indexing function
+function stop_indexing() {
+    if (!INDEXING_ACTIVE) return;
+    
+    INDEXING_STOPPED = true;
+    debug_qdrant('Indexing stop requested by user');
+    toastr.warning('Stopping indexing...', MODULE_NAME_FANCY);
+}
+
+// Transform indexing button to active/inactive state
+function update_indexing_button_state(isActive) {
+    const $button = $('#ct_index_chats');
+    
+    if (isActive) {
+        $button.addClass('ct_active');
+        $button.find('i').removeClass('fa-database').addClass('fa-stop');
+        $button.find('span').text('Stop');
+        $button.attr('title', 'Stop the current indexing operation');
+    } else {
+        $button.removeClass('ct_active');
+        $button.find('i').removeClass('fa-stop').addClass('fa-database');
+        $button.find('span').text('Index Chat');
+        $button.attr('title', 'Index all messages from current chat');
     }
 }
 
@@ -4081,6 +4135,11 @@ async function index_current_chat() {
         return;
     }
     
+    // Set indexing state
+    INDEXING_ACTIVE = true;
+    INDEXING_STOPPED = false;
+    update_indexing_button_state(true);
+    
     toastr.info('Indexing current chat...', MODULE_NAME_FANCY);
     
     let indexed = 0;
@@ -4090,6 +4149,12 @@ async function index_current_chat() {
     const indexBuffer = new MemoryBuffer();
     
     for (let i = 0; i < chat.length; i++) {
+        // Check if stop was requested
+        if (INDEXING_STOPPED) {
+            debug_qdrant(`Indexing stopped at message ${i}`);
+            break;
+        }
+        
         const message = chat[i];
         
         // Skip system messages
@@ -4115,15 +4180,22 @@ async function index_current_chat() {
         indexed++;
     }
     
-    // Flush any remaining messages
-    const finalChunk = indexBuffer.forceFlush();
-    if (finalChunk) {
-        chunks.push(finalChunk);
+    // Flush any remaining messages (unless stopped)
+    if (!INDEXING_STOPPED) {
+        const finalChunk = indexBuffer.forceFlush();
+        if (finalChunk) {
+            chunks.push(finalChunk);
+        }
     }
     
-    // Process all chunks
+    // Process all chunks (check stop flag during processing)
     let stored = 0;
     for (const chunk of chunks) {
+        if (INDEXING_STOPPED) {
+            debug_qdrant('Chunk processing stopped');
+            break;
+        }
+        
         try {
             await process_and_store_chunk(chunk);
             stored++;
@@ -4132,7 +4204,17 @@ async function index_current_chat() {
         }
     }
     
-    toastr.success(`Indexed ${indexed} messages into ${stored} chunks`, MODULE_NAME_FANCY);
+    // Reset indexing state
+    const wasStopped = INDEXING_STOPPED;
+    INDEXING_ACTIVE = false;
+    INDEXING_STOPPED = false;
+    update_indexing_button_state(false);
+    
+    if (wasStopped) {
+        toastr.info(`Indexing stopped: ${indexed} messages indexed into ${stored} chunks`, MODULE_NAME_FANCY);
+    } else {
+        toastr.success(`Indexed ${indexed} messages into ${stored} chunks`, MODULE_NAME_FANCY);
+    }
     debug_qdrant(`Indexed ${indexed} messages into ${stored} chunks`);
 }
 

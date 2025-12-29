@@ -261,17 +261,11 @@
                 <div class="ct_overview_section">
                     <h4><i class="fa-solid fa-bolt"></i> Quick Actions</h4>
                     <div class="ct_button_row">
-                        <button id="ct_ov_reset" class="menu_button" title="Reset truncation index and restart adaptive learning">
-                            <i class="fa-solid fa-rotate-left"></i> Reset
+                        <button id="ct_ov_reset_all" class="menu_button" title="Reset truncation and calibration for a clean slate">
+                            <i class="fa-solid fa-rotate-left"></i> Reset All
                         </button>
-                        <button id="ct_ov_recalibrate" class="menu_button" title="Reset calibration and start training from scratch">
-                            <i class="fa-solid fa-sync"></i> Recalibrate
-                        </button>
-                        <button id="ct_ov_summarize" class="menu_button" title="Summarize all messages without summaries">
-                            <i class="fa-solid fa-compress"></i> Summarize All
-                        </button>
-                        <button id="ct_ov_stop_summarize" class="menu_button menu_button_danger" title="Stop the current summarization queue" style="display: none;">
-                            <i class="fa-solid fa-stop"></i> Stop
+                        <button id="ct_ov_summarize" class="menu_button ct_action_button" data-action="summarize" title="Summarize all messages without summaries">
+                            <i class="fa-solid fa-compress"></i> <span>Summarize All</span>
                         </button>
                     </div>
                 </div>
@@ -396,17 +390,11 @@
 
                 <!-- Quick Actions -->
                 <div class="ct_button_row">
-                    <button id="ct_reset" class="menu_button" title="Reset truncation index and restart adaptive learning">
-                        <i class="fa-solid fa-rotate-left"></i> Reset
+                    <button id="ct_reset_all" class="menu_button" title="Reset truncation and calibration for a clean slate">
+                        <i class="fa-solid fa-rotate-left"></i> Reset All
                     </button>
-                    <button id="ct_recalibrate" class="menu_button" title="Reset calibration and start training from scratch">
-                        <i class="fa-solid fa-sync"></i> Recalibrate
-                    </button>
-                    <button id="ct_summarize_all" class="menu_button" title="Summarize all messages without summaries">
-                        <i class="fa-solid fa-compress"></i> Summarize All
-                    </button>
-                    <button id="ct_stop_summarize" class="menu_button menu_button_danger" title="Stop the current summarization queue" style="display: none;">
-                        <i class="fa-solid fa-stop"></i> Stop
+                    <button id="ct_summarize_all" class="menu_button ct_action_button" data-action="summarize" title="Summarize all messages without summaries">
+                        <i class="fa-solid fa-compress"></i> <span>Summarize All</span>
                     </button>
                 </div>
 
@@ -575,8 +563,8 @@
 
                 <!-- Quick Actions -->
                 <div class="ct_button_row">
-                    <button id="ct_index_chats" class="menu_button" title="Index all messages from current chat">
-                        <i class="fa-solid fa-database"></i> Index Chat
+                    <button id="ct_index_chats" class="menu_button ct_action_button" data-action="index" title="Index all messages from current chat">
+                        <i class="fa-solid fa-database"></i> <span>Index Chat</span>
                     </button>
                     <button id="ct_delete_collection" class="menu_button menu_button_danger" title="Delete all memories for this chat">
                         <i class="fa-solid fa-trash"></i> Delete Collection

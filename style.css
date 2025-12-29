@@ -100,17 +100,21 @@
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 12px;
+    padding: 12px 14px;
     background: rgba(33, 150, 243, 0.1);
     border: 1px solid rgba(33, 150, 243, 0.3);
     border-radius: 8px;
     margin-bottom: 10px;
+    overflow: visible;
+    box-sizing: border-box;
+    width: 100%;
 }
 
 .ct_info_box i {
     color: #90caf9;
     font-size: 1.1em;
     margin-top: 2px;
+    flex-shrink: 0;
 }
 
 .ct_info_box span {
@@ -118,6 +122,17 @@
     line-height: 1.4;
     flex: 1;
     min-width: 0;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Ensure overview sections don't clip content */
+.ct_overview_section {
+    overflow: visible;
+}
+
+.ct_tab_content {
+    overflow: visible;
 }
 
 /* ==================== DANGER BUTTON ==================== */
@@ -964,10 +979,22 @@
     display: none;
 }
 
+/* In popout: hide tab text, show only icons */
 #ct_popout .ct_tab {
-    padding: 6px 10px;
-    font-size: 0.85em;
+    padding: 10px 14px;
+    font-size: 0;  /* Hide text */
     white-space: nowrap;
+}
+
+#ct_popout .ct_tab i {
+    font-size: 1.1rem;  /* Restore icon size */
+    margin-right: 0;  /* No margin needed when text hidden */
+}
+
+/* ==================== POPOUT BUTTON ICON SPACING ==================== */
+#ct_popout .menu_button i,
+#ct_popout .ct_button_row .menu_button i {
+    margin-right: 0.5em;
 }
 
 /* ==================== POPOUT LOCK BUTTON ==================== */
@@ -1334,6 +1361,30 @@
     min-width: 100px;
     padding: 8px 12px;
     font-size: 0.85em;
+}
+
+/* ==================== ACTION BUTTON (TRANSFORMING BUTTON) ==================== */
+.ct_action_button {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.ct_action_button i {
+    transition: transform 0.2s ease;
+}
+
+/* Active state - button transforms to stop button */
+.ct_action_button.ct_active {
+    background: rgba(244, 67, 54, 0.3) !important;
+    border-color: rgba(244, 67, 54, 0.6) !important;
+    color: #ffaaaa !important;
+}
+
+.ct_action_button.ct_active:hover {
+    background: rgba(244, 67, 54, 0.5) !important;
+}
+
+.ct_action_button.ct_active i {
+    color: #ff6b6b;
 }
 
 /* ==================== SIMPLIFIED OVERVIEW STYLES ==================== */
