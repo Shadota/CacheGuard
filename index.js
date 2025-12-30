@@ -2208,10 +2208,11 @@ function closePopout() {
     
     $currentPopout.fadeOut(250, () => {
         const $drawer = $('#context_truncator_settings');
+        const $inlineDrawer = $drawer.find('.inline-drawer');
         
         if ($currentDrawerContent) {
-            // Move content back to drawer
-            $currentDrawerContent.detach().appendTo($drawer);
+            // Move content back to drawer (inside .inline-drawer for correct toggle behavior)
+            $currentDrawerContent.detach().appendTo($inlineDrawer);
             $currentDrawerContent.addClass('open').show();
         }
         
