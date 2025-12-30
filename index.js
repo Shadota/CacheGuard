@@ -207,6 +207,17 @@ let LAST_CHAT_LENGTH = 0;         // Track chat length to detect deletions
 let LAST_CHAT_HASHES = new Map(); // Map of message index -> content hash for edit detection
 const DELETION_TOLERANCE = 3;     // Max deletions before soft recalibration
 
+// ==================== TEMPORAL SEARCH FUNCTION REGISTRY (V13) ====================
+// These function references ensure temporal search is available in all execution contexts
+// including when called from globalThis.truncator_intercept_messages
+const TEMPORAL_SEARCH_METHODS = {
+    simple: null,
+    scoring: null,
+    client: null,
+    standard: null,
+    standardWithFilter: null
+};
+
 // Utility functions
 function log(...args) {
     console.log(`[${MODULE_NAME_FANCY}]`, ...args);
@@ -4469,22 +4480,36 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
 
         let results;
 
-        // Temporal search logic
+        // Temporal search logic with defensive checks for function availability
         if (get_settings('enable_temporal_boost')) {
             if (get_settings('use_simple_temporal_filter')) {
                 // Use simplified temporal filtering (filter out recent messages)
-                results = await search_with_simple_temporal(
-                    collection, queryEmbedding, requestLimit, scoreThreshold
-                );
+                if (TEMPORAL_SEARCH_METHODS.simple) {
+                    results = await TEMPORAL_SEARCH_METHODS.simple(
+                        collection, queryEmbedding, requestLimit, scoreThreshold
+                    );
+                } else {
+                    debug_qdrant('Simple temporal search not available, falling back to standard search');
+                    results = await (TEMPORAL_SEARCH_METHODS.standardWithFilter || search_standard_with_filter)(
+                        collection, queryEmbedding, requestLimit, scoreThreshold, timestampThreshold
+                    );
+                }
             } else {
                 // Use complex temporal scoring (server-side formula)
-                results = await search_with_temporal_scoring(
-                    collection, queryEmbedding, requestLimit, scoreThreshold
-                );
+                if (TEMPORAL_SEARCH_METHODS.scoring) {
+                    results = await TEMPORAL_SEARCH_METHODS.scoring(
+                        collection, queryEmbedding, requestLimit, scoreThreshold
+                    );
+                } else {
+                    debug_qdrant('Temporal scoring search not available, falling back to standard search');
+                    results = await (TEMPORAL_SEARCH_METHODS.standardWithFilter || search_standard_with_filter)(
+                        collection, queryEmbedding, requestLimit, scoreThreshold, timestampThreshold
+                    );
+                }
             }
         } else {
-            // Standard search with timestamp filtering
-            results = await search_standard_with_filter(
+            // Standard search without temporal boost
+            results = await (TEMPORAL_SEARCH_METHODS.standardWithFilter || search_standard_with_filter)(
                 collection, queryEmbedding, requestLimit, scoreThreshold, timestampThreshold
             );
         }
@@ -4621,16 +4646,26 @@ async function search_with_temporal_scoring(collection, queryEmbedding, limit, s
         if (!response.ok) {
             const errorText = await response.text();
             // If Query API fails (older Qdrant version), fall back to standard search with client-side temporal re-ranking
-            debug_qdrant(`Query API failed (${errorText}), falling back to client-side temporal scoring`);
-            return await search_with_client_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold);
+            if (TEMPORAL_SEARCH_METHODS.client) {
+                debug_qdrant(`Query API failed (${errorText}), falling back to client-side temporal scoring`);
+                return await TEMPORAL_SEARCH_METHODS.client(collection, queryEmbedding, limit, scoreThreshold);
+            } else {
+                debug_qdrant(`Query API failed (${errorText}), client-side temporal scoring not available, falling back to standard search`);
+                return await (TEMPORAL_SEARCH_METHODS.standard || search_standard)(collection, queryEmbedding, limit, scoreThreshold);
+            }
         }
         
         const data = await response.json();
         return data.result || [];
         
     } catch (e) {
-        debug_qdrant(`Query API error, falling back to client-side temporal scoring:`, e);
-        return await search_with_client_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold);
+        if (TEMPORAL_SEARCH_METHODS.client) {
+            debug_qdrant(`Query API error, falling back to client-side temporal scoring:`, e);
+            return await TEMPORAL_SEARCH_METHODS.client(collection, queryEmbedding, limit, scoreThreshold);
+        } else {
+            debug_qdrant(`Query API error, client-side temporal scoring not available, falling back to standard search:`, e);
+            return await (TEMPORAL_SEARCH_METHODS.standard || search_standard)(collection, queryEmbedding, limit, scoreThreshold);
+        }
     }
 }
 
@@ -4640,16 +4675,16 @@ async function search_with_client_temporal_scoring(collection, queryEmbedding, l
     const midpoint = get_settings('temporal_midpoint');
     const scaleMs = scaleDays * 24 * 60 * 60 * 1000;
     const now = Date.now();
-    
+
     // Get more results than needed for re-ranking
     const results = await search_standard(collection, queryEmbedding, limit * 3, scoreThreshold);
-    
+
     // Apply temporal scoring client-side
     const scoredResults = results.map(r => {
         const timestamp = r.payload?.timestamp || 0;
         const age = now - timestamp;
         const temporalMultiplier = midpoint + (1 - midpoint) * Math.exp(-Math.log(2) * age / scaleMs);
-        
+
         return {
             ...r,
             originalScore: r.score,
@@ -4657,14 +4692,24 @@ async function search_with_client_temporal_scoring(collection, queryEmbedding, l
             temporalMultiplier: temporalMultiplier
         };
     });
-    
+
     // Sort by new score and return top results
     scoredResults.sort((a, b) => b.score - a.score);
-    
+
     debug_qdrant(`Client-side temporal re-ranking applied to ${results.length} results`);
-    
+
     return scoredResults.slice(0, limit);
 }
+
+// Register temporal search functions in the registry
+// This ensures they're accessible from any execution context
+TEMPORAL_SEARCH_METHODS.simple = search_with_simple_temporal;
+TEMPORAL_SEARCH_METHODS.scoring = search_with_temporal_scoring;
+TEMPORAL_SEARCH_METHODS.client = search_with_client_temporal_scoring;
+TEMPORAL_SEARCH_METHODS.standard = search_standard;
+TEMPORAL_SEARCH_METHODS.standardWithFilter = search_standard_with_filter;
+
+debug_qdrant('Temporal search functions registered');
 
 // Map a raw search result to a standardized memory object
 function map_search_result_to_memory(r) {
