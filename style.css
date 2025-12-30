@@ -582,7 +582,7 @@
     background: var(--black30a);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 8px;
-    overflow: hidden;
+    overflow: visible;
 }
 
 .ct_card_header {
