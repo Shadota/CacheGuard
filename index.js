@@ -2563,6 +2563,8 @@ class SummaryQueue {
             $buttons.find('span').text('Stop');
             // Remove title to prevent hover tooltip during operation
             $buttons.removeAttr('title');
+            // Remove any pending mouseenter handler
+            $buttons.off('mouseenter.ct_title');
         } else if (state === 'stopping') {
             $buttons.addClass('ct_stopping').removeClass('ct_active').prop('disabled', true);
             $buttons.find('i').removeClass('fa-compress fa-stop').addClass('fa-spinner fa-spin');
@@ -2573,8 +2575,11 @@ class SummaryQueue {
             $buttons.removeClass('ct_active ct_stopping').prop('disabled', false);
             $buttons.find('i').removeClass('fa-stop fa-spinner fa-spin').addClass('fa-compress');
             $buttons.find('span').text('Summarize All');
-            // Restore title when idle
-            $buttons.attr('title', 'Summarize all messages without summaries');
+            // Don't restore title immediately - wait for mouse to leave and re-enter
+            // This prevents tooltip flash when operation completes with mouse over button
+            $buttons.off('mouseenter.ct_title').one('mouseenter.ct_title', function() {
+                $(this).attr('title', 'Summarize all messages without summaries');
+            });
         }
     }
     
@@ -2714,11 +2719,12 @@ class SummaryQueue {
             // Create new AbortController for this generation
             this.abortController = new AbortController();
             
-            // Get generateRaw from context
-            const { generateRaw } = ctx;
+            // Get generateRaw from SillyTavern global context (not extensions.js context)
+            // The SillyTavern object is globally available in the browser
+            const { generateRaw } = SillyTavern.getContext();
             
             if (!generateRaw) {
-                throw new Error('generateRaw not available in context');
+                throw new Error('generateRaw not available - ensure SillyTavern is loaded');
             }
             
             debug(`Generating summary with prefill: "${speakerLabel}"`);
