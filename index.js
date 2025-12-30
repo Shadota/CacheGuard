@@ -4396,6 +4396,30 @@ async function upsert_points(points) {
     debug_qdrant(`Upserted ${points.length} points to ${collection}`);
 }
 
+// Simple temporal filtering (like st-qdrant-memory)
+// Excludes recent messages based on retain_recent_messages setting
+async function search_with_simple_temporal(collection, queryEmbedding, limit, scoreThreshold) {
+    // Calculate timestamp threshold to exclude recent messages
+    const ctx = getContext();
+    const chat = ctx.chat || [];
+    const retainRecent = get_settings('retain_recent_messages');
+    let timestampThreshold = 0;
+
+    if (retainRecent > 0 && chat.length > retainRecent) {
+        const retainIndex = chat.length - retainRecent;
+        const retainMessage = chat[retainIndex];
+        if (retainMessage && retainMessage.send_date) {
+            timestampThreshold = normalizeTimestamp(retainMessage.send_date);
+            debug_qdrant(`Simple temporal filter: excluding messages newer than ${timestampThreshold}`);
+        }
+    }
+
+    // Use standard search with timestamp filtering
+    return await search_standard_with_filter(
+        collection, queryEmbedding, limit, scoreThreshold, timestampThreshold
+    );
+}
+
 // Simple, reliable search limit calculation (V13 - simplified like st-qdrant-memory)
 function calculateSearchLimit(limit) {
     // Fixed 1.5x overfetch for temporal re-ranking - much more reasonable than 3x
@@ -4449,8 +4473,8 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
         if (get_settings('enable_temporal_boost')) {
             if (get_settings('use_simple_temporal_filter')) {
                 // Use simplified temporal filtering (filter out recent messages)
-                results = await search_standard_with_filter(
-                    collection, queryEmbedding, requestLimit, scoreThreshold, timestampThreshold
+                results = await search_with_simple_temporal(
+                    collection, queryEmbedding, requestLimit, scoreThreshold
                 );
             } else {
                 // Use complex temporal scoring (server-side formula)
@@ -4492,25 +4516,61 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
 // Standard search without temporal scoring
 async function search_standard(collection, queryEmbedding, limit, scoreThreshold) {
     const url = get_settings('qdrant_url');
-    
+
     const searchBody = {
         vector: queryEmbedding,
         limit: limit,
         score_threshold: scoreThreshold,
         with_payload: true
     };
-    
+
     const response = await fetch(`${url}/collections/${collection}/points/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(searchBody)
     });
-    
+
     if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Search failed: ${errorText}`);
     }
-    
+
+    const data = await response.json();
+    return data.result || [];
+}
+
+// Standard search with timestamp filtering (excludes recent messages)
+async function search_standard_with_filter(collection, queryEmbedding, limit, scoreThreshold, timestampThreshold) {
+    const url = get_settings('qdrant_url');
+
+    const searchBody = {
+        vector: queryEmbedding,
+        limit: limit,
+        score_threshold: scoreThreshold,
+        with_payload: true,
+        filter: {
+            must: [
+                {
+                    key: 'timestamp',
+                    range: {
+                        lt: timestampThreshold
+                    }
+                }
+            ]
+        }
+    };
+
+    const response = await fetch(`${url}/collections/${collection}/points/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchBody)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Search failed: ${errorText}`);
+    }
+
     const data = await response.json();
     return data.result || [];
 }
