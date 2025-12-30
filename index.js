@@ -55,11 +55,14 @@ const default_settings = {
 NAMES: {{user}} is the user's character. {{char}} is the AI character.
 
 RULES:
-• Output ONE sentence in past tense, max {{words}} words
+• Output ONLY the summary - nothing else
+• ONE sentence in past tense, max {{words}} words
 • Start with speaker label: "{{char}}:", "{{user}}:", or "Narrator:"
 • Focus on: actions, decisions, emotions, key plot/worldbuilding details
 • Never add information not in the original message
-• Never include meta-commentary, tags, or template text
+• Never include reasoning, explanations, or meta-commentary
+• Never use tags like <think>, </think>, or similar
+• Stop immediately after the summary sentence
 
 EXAMPLES:
 • "{{char}}: Accepted the apology but remained emotionally guarded."
@@ -2507,6 +2510,7 @@ class SummaryQueue {
         this.queue = [];
         this.active = false;
         this.stopped = false;
+        this.abortController = null;  // For hard-stopping current generation
     }
     
     async summarize(indexes) {
@@ -2522,37 +2526,54 @@ class SummaryQueue {
         }
         
         // Transform button to active/stop state
-        this.updateButtonState(true);
+        this.updateButtonState('active');
         
         if (!this.active) {
             await this.process();
         }
     }
     
-    // Stop the summarization queue
+    // Stop the summarization queue (hard-stop)
     stop() {
         if (!this.active) return;
         
         this.stopped = true;
         this.queue = [];
         
+        // Abort current generation if in progress
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+            debug('Aborted current summarization generation');
+        }
+        
+        // Show "Stopping..." state while cleanup completes
+        this.updateButtonState('stopping');
+        
         debug('Summarization queue stopped by user');
-        toastr.warning('Summarization stopped', MODULE_NAME_FANCY);
     }
     
-    // Transform button to active/inactive state
-    updateButtonState(isActive) {
+    // Transform button to active/inactive/stopping state
+    updateButtonState(state) {
         const $buttons = $('#ct_summarize_all, #ct_ov_summarize');
         
-        if (isActive) {
-            $buttons.addClass('ct_active');
-            $buttons.find('i').removeClass('fa-compress').addClass('fa-stop');
+        if (state === 'active') {
+            $buttons.addClass('ct_active').removeClass('ct_stopping').prop('disabled', false);
+            $buttons.find('i').removeClass('fa-compress fa-spinner fa-spin').addClass('fa-stop');
             $buttons.find('span').text('Stop');
-            $buttons.attr('title', 'Stop the current summarization');
+            // Remove title to prevent hover tooltip during operation
+            $buttons.removeAttr('title');
+        } else if (state === 'stopping') {
+            $buttons.addClass('ct_stopping').removeClass('ct_active').prop('disabled', true);
+            $buttons.find('i').removeClass('fa-compress fa-stop').addClass('fa-spinner fa-spin');
+            $buttons.find('span').text('Stopping...');
+            // Remove title during stopping state
+            $buttons.removeAttr('title');
         } else {
-            $buttons.removeClass('ct_active');
-            $buttons.find('i').removeClass('fa-stop').addClass('fa-compress');
+            $buttons.removeClass('ct_active ct_stopping').prop('disabled', false);
+            $buttons.find('i').removeClass('fa-stop fa-spinner fa-spin').addClass('fa-compress');
             $buttons.find('span').text('Summarize All');
+            // Restore title when idle
             $buttons.attr('title', 'Summarize all messages without summaries');
         }
     }
@@ -2580,8 +2601,81 @@ class SummaryQueue {
         update_summary_stats_display();
         update_overview_tab();
         
-        // Transform button back to normal state
-        this.updateButtonState(false);
+        // Transform button back to normal state (handles both completion and stop)
+        this.updateButtonState('inactive');
+    }
+    
+    // Clean summary output - extract only the actual summary, strip thinking content
+    clean_summary_output(text) {
+        if (!text) return '';
+        
+        let cleaned = text.trim();
+        
+        // Remove complete <think>...</think> blocks first (including content)
+        cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        
+        // Remove orphaned think tags and everything after them
+        const orphanedThinkMatch = cleaned.match(/<\/?think>/i);
+        if (orphanedThinkMatch) {
+            cleaned = cleaned.substring(0, orphanedThinkMatch.index).trim();
+        }
+        
+        // Patterns that indicate reasoning/thinking content (truncate at these)
+        const thinkingPatterns = [
+            /\n\s*Hmm,/i,                    // "Hmm," reasoning start
+            /\n\s*Let me/i,                  // "Let me" reasoning start
+            /\n\s*Looking at/i,              // "Looking at" reasoning
+            /\n\s*I need to/i,               // "I need to" reasoning
+            /\n\s*First,/i,                  // "First," step-by-step
+            /\n\s*The (user|message|speaker)/i,  // "The user/message/speaker" analysis
+            /\n\s*Breaking down/i,           // Analysis phrase
+            /\n\s*I'll/i,                    // "I'll" planning
+            /\n\s*I think/i,                 // "I think" reasoning
+            /\n\s*Now,/i,                    // "Now," step
+            /\n\s*For the/i,                 // "For the" analysis
+            /\n\s*This (captures|covers|summarizes)/i,  // Meta-commentary
+            /\n\s*Perfect!/i,                // Self-congratulation
+            /\n\s*That's/i,                  // Self-evaluation
+            /\n\s*\(\d+\s*words?\)/i,        // Word count markers like "(45 words)"
+            /\n\s*I've/i,                    // "I've" reasoning
+            /\n\s*Analyzing/i,               // Analysis marker
+            /\n\s*The key/i,                 // "The key" analysis
+        ];
+        
+        for (const pattern of thinkingPatterns) {
+            const match = cleaned.match(pattern);
+            if (match) {
+                cleaned = cleaned.substring(0, match.index).trim();
+            }
+        }
+        
+        // Remove word count annotations like "(45 words)" anywhere in text
+        cleaned = cleaned.replace(/\s*\(\d+\s*words?\)\s*/gi, '').trim();
+        
+        // Split on double newlines and take first meaningful paragraph
+        const paragraphs = cleaned.split(/\n\n+/);
+        for (const para of paragraphs) {
+            const trimmedPara = para.trim();
+            // Skip empty paragraphs and those that look like meta-content
+            if (trimmedPara && trimmedPara.length > 10 &&
+                !trimmedPara.toLowerCase().startsWith('hmm') &&
+                !trimmedPara.toLowerCase().startsWith('let me') &&
+                !trimmedPara.toLowerCase().startsWith('i need')) {
+                cleaned = trimmedPara;
+                break;
+            }
+        }
+        
+        // Take only the first line if multiple lines remain (summary should be one sentence)
+        const firstLine = cleaned.split('\n')[0].trim();
+        if (firstLine && firstLine.length > 10) {
+            cleaned = firstLine;
+        }
+        
+        // Remove any leading/trailing quotes that might have been added
+        cleaned = cleaned.replace(/^["']|["']$/g, '').trim();
+        
+        return cleaned;
     }
     
     async summarize_message(index) {
@@ -2592,11 +2686,22 @@ class SummaryQueue {
             return;
         }
         
+        // Check if stopped before starting
+        if (this.stopped) {
+            debug(`Summarization stopped, skipping message ${index}`);
+            return;
+        }
+        
         debug(`Summarizing message ${index}...`);
         
         // Create summary prompt with placeholders
         const prompt_template = get_settings('summary_prompt');
         const max_words = get_settings('summary_max_words') || 50;
+        
+        // Determine the likely speaker for the prefill
+        const speakerLabel = message.is_user
+            ? (ctx.name1 || 'User') + ':'
+            : (ctx.name2 || 'Character') + ':';
         
         let prompt = prompt_template
             .replace(/\{\{message\}\}/g, message.mes)
@@ -2604,25 +2709,63 @@ class SummaryQueue {
             .replace(/\{\{user\}\}/g, ctx.name1 || 'User')
             .replace(/\{\{char\}\}/g, ctx.name2 || 'Character');
         
-        // Generate summary using connection profile
+        // Generate summary using generateRaw with prefill
         try {
-            const profile_id = get_summary_connection_profile();
+            // Create new AbortController for this generation
+            this.abortController = new AbortController();
             
-            // Create messages array for the request
-            const messages = [{
-                role: 'system',
-                content: prompt
-            }];
+            // Get generateRaw from context
+            const { generateRaw } = ctx;
             
-            // Use ConnectionManagerRequestService to send with specific profile
-            debug(`Using profile ${profile_id} for summarization`);
-            const result = await ctx.ConnectionManagerRequestService.sendRequest(profile_id, messages);
+            if (!generateRaw) {
+                throw new Error('generateRaw not available in context');
+            }
             
-            if (result && result.content) {
-                let summary = result.content.trim();
+            debug(`Generating summary with prefill: "${speakerLabel}"`);
+            
+            // Use generateRaw with prefill to force response format
+            // The prefill starts the response with the speaker label, preventing <think> blocks
+            const result = await generateRaw({
+                prompt: prompt,
+                prefill: speakerLabel + ' ',  // Start response with speaker label
+                // Note: generateRaw doesn't support abortSignal directly,
+                // but we check this.stopped before and after the call
+            });
+            
+            // Check if stopped during generation
+            if (this.stopped) {
+                debug(`Summarization stopped during generation of message ${index}`);
+                this.abortController = null;
+                return;
+            }
+            
+            this.abortController = null;
+            
+            if (result) {
+                // The result should already start with the speaker label from prefill
+                // Prepend the prefill since it's not included in the response
+                let rawSummary = speakerLabel + ' ' + result;
+                
+                // Clean the output - remove any thinking content that might have snuck through
+                let summary = this.clean_summary_output(rawSummary);
+                
+                // If cleaning removed the speaker label, add it back
+                if (!summary.includes(':')) {
+                    summary = speakerLabel + ' ' + summary;
+                }
                 
                 // Trim incomplete sentences if enabled
-                if (ctx.powerUserSettings.trim_sentences) {
+                if (ctx.powerUserSettings?.trim_sentences) {
+                    summary = trimToEndSentence(summary);
+                }
+                
+                // Validate the summary looks reasonable
+                if (summary.length < 10) {
+                    debug(`Warning: Summary too short (${summary.length}), may need review`);
+                } else if (summary.length > 300) {
+                    // Truncate overly long summaries (shouldn't happen with prefill but safety measure)
+                    debug(`Warning: Summary too long (${summary.length}), truncating`);
+                    summary = summary.substring(0, 300);
                     summary = trimToEndSentence(summary);
                 }
                 
@@ -2634,12 +2777,20 @@ class SummaryQueue {
                 debug(`Summarized message ${index}: "${summary}"`);
             }
         } catch (e) {
-            error(`Failed to summarize message ${index}:`, e);
-            set_data(message, 'error', String(e));
+            // Don't log error if it was an abort
+            if (e.name === 'AbortError' || this.stopped) {
+                debug(`Summarization aborted for message ${index}`);
+            } else {
+                error(`Failed to summarize message ${index}:`, e);
+                set_data(message, 'error', String(e));
+            }
+            this.abortController = null;
         }
         
-        // Refresh memory after summarization
-        refresh_memory();
+        // Refresh memory after summarization (unless stopped)
+        if (!this.stopped) {
+            refresh_memory();
+        }
     }
 }
 
@@ -2859,9 +3010,7 @@ function initialize_ui_listeners() {
         }
         
         if (indexes.length > 0) {
-            toastr.info(`Summarizing ${indexes.length} messages...`, MODULE_NAME_FANCY);
             await summaryQueue.summarize(indexes);
-            toastr.success('Summarization complete', MODULE_NAME_FANCY);
         } else {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
@@ -2978,9 +3127,7 @@ function initialize_ui_listeners() {
         }
         
         if (indexes.length > 0) {
-            toastr.info(`Summarizing ${indexes.length} messages...`, MODULE_NAME_FANCY);
             await summaryQueue.summarize(indexes);
-            toastr.success('Summarization complete', MODULE_NAME_FANCY);
         } else {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
