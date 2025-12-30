@@ -263,16 +263,45 @@ function get_summary_connection_profile() {
     return "";  // Empty = use current profile (no switch needed)
 }
 
-async function set_connection_profile(name) {
+async function set_connection_profile(profileId) {
     if (!check_connection_profiles_active()) return;
-    if (!name) return;  // Empty name means use current, no switch needed
+    if (!profileId) return;  // Empty ID means use current, no switch needed
+    
+    // Look up the profile to get the actual NAME (the /profile command expects a name, not an ID)
+    const profile = get_connection_profile(profileId);
+    if (!profile) {
+        debug(`Profile with ID "${profileId}" not found, cannot switch`);
+        return;
+    }
+    
+    const profileName = profile.name;
+    const currentProfile = await get_current_connection_profile();
+    
+    if (profileName === currentProfile) {
+        debug(`Already using profile "${profileName}", no switch needed`);
+        return;  // Already using this profile
+    }
+    
+    debug(`Switching connection profile from "${currentProfile}" to "${profileName}" (ID: ${profileId})`);
+    const ctx = getContext();
+    await ctx.executeSlashCommandsWithOptions(`/profile ${profileName}`);
+}
+
+// Set connection profile by NAME (used for restoration after summarization)
+// This mirrors SillyTavern-MessageSummarize's approach
+async function set_connection_profile_by_name(profileName) {
+    if (!check_connection_profiles_active()) return;
+    if (!profileName) return;
     
     const currentProfile = await get_current_connection_profile();
-    if (name === currentProfile) return;  // Already using this profile
+    if (profileName === currentProfile) {
+        debug(`Already using profile "${profileName}", no switch needed`);
+        return;
+    }
     
-    debug(`Switching connection profile to: ${name}`);
+    debug(`Switching connection profile to "${profileName}"`);
     const ctx = getContext();
-    await ctx.executeSlashCommandsWithOptions(`/profile ${name}`);
+    await ctx.executeSlashCommandsWithOptions(`/profile ${profileName}`);
 }
 
 async function update_connection_profile_dropdown() {
@@ -2728,17 +2757,26 @@ class SummaryQueue {
         // === CONNECTION PROFILE SWITCHING ===
         // Save current profile and switch to summary profile if configured
         let originalProfile = null;
-        const summaryProfile = get_summary_connection_profile();
+        const summaryProfileId = get_summary_connection_profile();  // Returns ID
         
-        if (summaryProfile) {
+        if (summaryProfileId) {
             // A specific profile is configured for summarization
-            originalProfile = await get_current_connection_profile();
-            if (originalProfile !== summaryProfile) {
-                debug(`Switching from profile "${originalProfile}" to "${summaryProfile}" for summarization`);
-                await set_connection_profile(summaryProfile);
+            // Get the profile data to get the NAME (for comparison with current)
+            const summaryProfileData = get_connection_profile(summaryProfileId);
+            const summaryProfileName = summaryProfileData ? summaryProfileData.name : null;
+            
+            if (summaryProfileName) {
+                originalProfile = await get_current_connection_profile();  // Returns NAME
+                if (originalProfile !== summaryProfileName) {
+                    debug(`Switching from profile "${originalProfile}" to "${summaryProfileName}" (ID: ${summaryProfileId}) for summarization`);
+                    await set_connection_profile(summaryProfileId);  // Pass ID, function converts to name
+                } else {
+                    // Already using the correct profile, no need to restore later
+                    debug(`Already using summary profile "${summaryProfileName}", no switch needed`);
+                    originalProfile = null;
+                }
             } else {
-                // Already using the correct profile, no need to restore later
-                originalProfile = null;
+                debug(`Summary profile ID "${summaryProfileId}" not found in available profiles`);
             }
         }
         // === END CONNECTION PROFILE SWITCHING ===
@@ -2840,7 +2878,8 @@ class SummaryQueue {
             // Always restore the original profile, even if an error occurred
             if (originalProfile) {
                 debug(`Restoring original profile "${originalProfile}"`);
-                await set_connection_profile(originalProfile);
+                // Use set_connection_profile_by_name since originalProfile is a NAME, not an ID
+                await set_connection_profile_by_name(originalProfile);
             }
             // === END RESTORE CONNECTION PROFILE ===
         }
