@@ -17,6 +17,7 @@ import {
     extension_prompt_roles,
     extension_prompt_types,
     chat_metadata,
+    generateRaw,
 } from '../../../../script.js';
 
 import { 
@@ -2448,6 +2449,16 @@ function add_popout_button() {
     }
     
     debug_trunc('Popout button added to header (minimal insertion)');
+    
+    // Intercept drawer header clicks when popout is visible
+    // This allows clicking the dropdown header to close the popout and return to inline mode
+    $header.on('click.ctPopout', function(event) {
+        if (POPOUT_VISIBLE) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            closePopout();
+        }
+    });
 }
 
 // ==================== MEMORY DISPLAY ====================
@@ -2719,14 +2730,7 @@ class SummaryQueue {
             // Create new AbortController for this generation
             this.abortController = new AbortController();
             
-            // Get generateRaw from SillyTavern global context (not extensions.js context)
-            // The SillyTavern object is globally available in the browser
-            const { generateRaw } = SillyTavern.getContext();
-            
-            if (!generateRaw) {
-                throw new Error('generateRaw not available - ensure SillyTavern is loaded');
-            }
-            
+            // generateRaw is imported from script.js at module level
             debug(`Generating summary with prefill: "${speakerLabel}"`);
             
             // Use generateRaw with prefill to force response format
