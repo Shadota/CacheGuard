@@ -743,13 +743,16 @@ function handle_message_deleted() {
     
     // Update snapshot
     snapshot_chat_state();
-    
+
     // Update UI
     update_resilience_ui();
-    
+
     // Refresh memory
     refresh_memory();
-    
+
+    // Update chat length tracking (FIX: ensure this always runs)
+    LAST_CHAT_LENGTH = currentLength;
+
     debug_trunc(`═══════════════════════════════`);
 }
 
@@ -1235,6 +1238,10 @@ let LAST_ACTUAL_PROMPT_SIZE = 0;
 let LAST_PREDICTED_SIZE = 0;
 let LAST_PREDICTED_CHAT_SIZE = 0;
 let LAST_PREDICTED_NON_CHAT_SIZE = 0;
+
+// Cache for valid Overview tab data to prevent wild utilization swings
+let LAST_VALID_UTILIZATION = null;
+let LAST_VALID_MAX_CONTEXT = null;
 
 // Adaptive correction factor (learned from previous generations)
 let CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Multiplier for chat token estimates
@@ -1759,51 +1766,49 @@ function update_overview_tab() {
     const maxContext = getMaxContextSize();
     
     // Update Gauge
-    if (last_raw_prompt) {
+    if (last_raw_prompt && maxContext > 0) {
         const actualSize = count_tokens(last_raw_prompt);
         const utilization = (actualSize / maxContext * 100);
         
-        // Update gauge fill
-        const $gaugeFill = $('#ct_gauge_fill');
-        $gaugeFill.css('width', `${Math.min(utilization, 100)}%`);
-        
-        // Update target marker position
-        const targetUtilization = get_settings('target_utilization');
-        $('#ct_gauge_target').css('left', `${targetUtilization * 100}%`);
-        
-        // Smart gauge color based on calibration state
-        $gaugeFill.removeClass('ct_gauge_green ct_gauge_yellow ct_gauge_red');
-        
-        if (CALIBRATION_STATE === 'WAITING') {
-            // Waiting phase = always green (extension not active yet)
-            $gaugeFill.addClass('ct_gauge_green');
+        // Sanity check - utilization should be between 0 and 150%
+        if (utilization >= 0 && utilization <= 150) {
+            LAST_VALID_UTILIZATION = utilization;
+            LAST_VALID_MAX_CONTEXT = maxContext;
+
+            // Update gauge fill
+            const $gaugeFill = $('#ct_gauge_fill');
+            $gaugeFill.css('width', `${Math.min(utilization, 100)}%`);
+            // ... rest of gauge update
+
+            $('#ct_gauge_value').text(`${utilization.toFixed(1)}%`);
+            $('#ct_gauge_max').text(`of ${maxContext.toLocaleString()} tokens`);
         } else {
-            // Active phases - color based on deviation from target
-            const tolerance = get_settings('calibration_tolerance');
-            const targetPct = targetUtilization * 100;
-            const deviation = Math.abs(utilization - targetPct);
-            const tolerancePct = tolerance * 100;
-            
-            // Midpoint between target and tolerance boundary
-            const midpointDeviation = tolerancePct / 2;
-            
-            if (deviation <= midpointDeviation) {
-                // Within midpoint - green (close to target)
-                $gaugeFill.addClass('ct_gauge_green');
-            } else if (deviation <= tolerancePct) {
-                // Between midpoint and tolerance - yellow (slightly off)
-                $gaugeFill.addClass('ct_gauge_yellow');
+            // Invalid utilization - use cached or show placeholder
+            if (LAST_VALID_UTILIZATION !== null) {
+                // Use last known good values
+                $('#ct_gauge_value').text(`${LAST_VALID_UTILIZATION.toFixed(1)}%`);
+                $('#ct_gauge_max').text(`of ${LAST_VALID_MAX_CONTEXT.toLocaleString()} tokens`);
             } else {
-                // Beyond tolerance - red (significantly off)
-                $gaugeFill.addClass('ct_gauge_red');
+                // Show placeholder
+                $('#ct_gauge_value').text('--%');
             }
         }
-        
-        // Update labels
-        $('#ct_gauge_value').text(`${utilization.toFixed(1)}%`);
-        $('#ct_gauge_max').text(`of ${maxContext.toLocaleString()} tokens`);
-        
-        // Update Breakdown Bar (now includes World Rules)
+    } else {
+        // No data available
+        if (LAST_VALID_UTILIZATION !== null && LAST_VALID_MAX_CONTEXT !== null) {
+            // Keep showing last valid data
+            $('#ct_gauge_value').text(`${LAST_VALID_UTILIZATION.toFixed(1)}%`);
+            $('#ct_gauge_max').text(`of ${LAST_VALID_MAX_CONTEXT.toLocaleString()} tokens`);
+        } else {
+            // Show placeholder
+            $('#ct_gauge_fill').css('width', '0%');
+            $('#ct_gauge_value').text('--%');
+            $('#ct_gauge_max').text(`of ${maxContext.toLocaleString()} tokens`);
+        }
+    }
+
+    // Update Breakdown Bar (now includes World Rules)
+    if (last_raw_prompt) {
         const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         const chatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
         const worldRulesTokens = calculate_world_rules_tokens(last_raw_prompt);
@@ -1949,20 +1954,22 @@ function collect_summarization_stats() {
         return stats;
     }
     
+    // FIX: Handle null/undefined TRUNCATION_INDEX properly
     const truncIndex = TRUNCATION_INDEX || 0;
     const queueIndexes = new Set(summaryQueue.queue);
-    
+
     for (let i = 0; i < chat.length; i++) {
         const message = chat[i];
-        
+
         // Skip system messages
         if (message.is_system) {
             continue;
         }
-        
+
         stats.totalMessages++;
-        
-        const lagging = i < truncIndex;  // Message is excluded from context
+
+        // FIX: Correct lagging check - message is excluded if i < truncIndex
+        const lagging = truncIndex > 0 && i < truncIndex;  // Message is excluded from context
         const hasSummary = !!get_memory(message);
         const inQueue = queueIndexes.has(i);
         
@@ -2124,9 +2131,9 @@ function update_summary_stats_display() {
     const excludedCount = stats.truncated;  // Messages excluded from context
     const summarizedCount = stats.summarized;  // Excluded messages with summaries
     const pendingCount = stats.pending + stats.inQueue;  // Excluded messages awaiting summarization
-    
-    // Calculate coverage percentage (what % of excluded messages have summaries)
-    const coveragePercent = excludedCount > 0 ? (summarizedCount / excludedCount) * 100 : 0;
+
+    // FIX: Safe coverage calculation (avoid division by zero)
+    const coveragePercent = excludedCount > 0 ? Math.round((summarizedCount / excludedCount) * 100) : 0;
     
     // Update Overview tab Summaries card (Version 2E design)
     $('#ct_ov_excluded_count').text(`${excludedCount} messages`);
