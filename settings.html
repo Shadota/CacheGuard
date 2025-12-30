@@ -120,7 +120,7 @@
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">
                                     Phase
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Calibration state: WAITING → TRAINING → CALIBRATING → STABLE</span>
                                     </span>
@@ -130,7 +130,7 @@
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">
                                     Next Trim
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Estimated generations until context truncation occurs</span>
                                     </span>
@@ -139,24 +139,18 @@
                             </div>
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">
-                                    Context
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    Truncated
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                        <span class="ct_tooltip_text">Current actual size / target size in tokens</span>
+                                        <span class="ct_tooltip_text">Percentage of chat messages excluded from context</span>
                                     </span>
                                 </span>
-                                <span id="ct_ov_context" class="ct_stat_value">
-                                    <span class="ct_context_combined">
-                                        <span id="ct_ov_actual_size_short" class="ct_actual">--</span>
-                                        <span class="ct_separator">/</span>
-                                        <span id="ct_ov_target_size_short" class="ct_target">--</span>
-                                    </span>
-                                </span>
+                                <span id="ct_ov_truncated_pct" class="ct_stat_value">--%</span>
                             </div>
                         </div>
                     </div>
     
-                    <!-- Summaries Card (simplified) -->
+                    <!-- Summaries Card (redesigned with mini progress bar) -->
                     <div class="ct_stats_card">
                         <div class="ct_card_header">
                             <div class="ct_card_header_left">
@@ -167,25 +161,28 @@
                         <div class="ct_card_content">
                             <div class="ct_stat_row">
                                 <span class="ct_stat_label">
-                                    Progress
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    Truncated
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                        <span class="ct_tooltip_text">Summarized messages / total truncated messages</span>
+                                        <span class="ct_tooltip_text">Messages excluded from context that need summarization</span>
                                     </span>
                                 </span>
-                                <span id="ct_ov_sum_progress" class="ct_stat_value">
-                                    <span id="ct_ov_sum_done">--</span> / <span id="ct_ov_sum_total">--</span>
-                                </span>
+                                <span id="ct_ov_truncated_count" class="ct_stat_value">--</span>
                             </div>
-                            <div class="ct_stat_row">
+                            <div class="ct_stat_row ct_stat_row_progress">
                                 <span class="ct_stat_label">
-                                    In Context
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    Summarized
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                        <span class="ct_tooltip_text">Messages still in active context (not truncated)</span>
+                                        <span class="ct_tooltip_text">Progress of summarization for truncated messages</span>
                                     </span>
                                 </span>
-                                <span id="ct_ov_sum_active" class="ct_stat_value">--</span>
+                                <span class="ct_stat_value ct_summary_progress_wrapper">
+                                    <span id="ct_ov_sum_text">-- / --</span>
+                                    <div class="ct_mini_progress_bar">
+                                        <div id="ct_ov_sum_bar_fill" class="ct_mini_progress_fill"></div>
+                                    </div>
+                                </span>
                             </div>
                         </div>
                     </div>
@@ -202,7 +199,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Correction
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Learned multiplier for token estimation accuracy (1.0 = perfect)</span>
                                     </span>
@@ -212,7 +209,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Trunc. Index
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Message index where truncation begins (0 = no truncation)</span>
                                     </span>
@@ -222,7 +219,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Msg Changes
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Message deletions since stable state. Recalibrates at 3.</span>
                                     </span>
@@ -232,7 +229,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Cal. Progress
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Progress toward stable calibration</span>
                                     </span>
@@ -242,7 +239,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Difference
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Actual size minus target size</span>
                                     </span>
@@ -252,7 +249,7 @@
                             <div class="ct_advanced_item">
                                 <span class="ct_advanced_label">
                                     Room Left
-                                    <span class="ct_tooltip ct_tooltip_right">
+                                    <span class="ct_tooltip">
                                         <i class="fa-solid fa-circle-info ct_info_icon"></i>
                                         <span class="ct_tooltip_text">Tokens remaining before target exceeded</span>
                                     </span>

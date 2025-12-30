@@ -1767,6 +1767,16 @@ function update_overview_tab() {
         $('#ct_ov_error').text(`${percentError.toFixed(1)}%`);
         $('#ct_ov_trunc_index').text(TRUNCATION_INDEX !== null ? TRUNCATION_INDEX : '--');
         $('#ct_ov_correction').text(CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3));
+        
+        // Calculate and display truncation percentage (what % of chat is truncated)
+        const ctx = getContext();
+        const chat = ctx.chat;
+        const totalNonSystemMessages = chat ? chat.filter(m => !m.is_system).length : 0;
+        const truncatedMessages = TRUNCATION_INDEX || 0;
+        const truncatedPercent = totalNonSystemMessages > 0
+            ? ((truncatedMessages / totalNonSystemMessages) * 100).toFixed(1)
+            : 0;
+        $('#ct_ov_truncated_pct').text(`${truncatedPercent}%`);
     } else {
         // No data available
         $('#ct_gauge_fill').css('width', '0%');
@@ -1846,12 +1856,12 @@ function collect_summarization_stats() {
     const chat = ctx.chat;
     
     const stats = {
-        total: 0,
-        summarized: 0,
-        pending: 0,
-        inQueue: 0,
-        inContext: 0,
-        notApplicable: 0
+        totalMessages: 0,      // Total non-system messages
+        truncated: 0,          // Messages excluded from context (lagging)
+        summarized: 0,         // Truncated messages that have summaries
+        pending: 0,            // Truncated messages without summaries (not in queue)
+        inQueue: 0,            // Messages currently being processed
+        inContext: 0           // Messages still in active context
     };
     
     if (!chat || chat.length === 0) {
@@ -1869,28 +1879,26 @@ function collect_summarization_stats() {
             continue;
         }
         
-        stats.total++;
+        stats.totalMessages++;
         
         const lagging = i < truncIndex;  // Message is excluded from context
         const hasSummary = !!get_memory(message);
-        const needsSummary = get_data(message, 'needs_summary');
         const inQueue = queueIndexes.has(i);
         
-        if (inQueue) {
-            // Currently in the summarization queue
-            stats.inQueue++;
-        } else if (!lagging) {
-            // Message is in active context (not excluded)
-            stats.inContext++;
-        } else if (hasSummary) {
-            // Excluded message that has been summarized
-            stats.summarized++;
-        } else if (needsSummary) {
-            // Excluded message waiting to be summarized
-            stats.pending++;
+        // Context status (independent of queue status)
+        if (lagging) {
+            stats.truncated++;
+            
+            // Summarization status for truncated messages
+            if (hasSummary) {
+                stats.summarized++;
+            } else if (inQueue) {
+                stats.inQueue++;
+            } else {
+                stats.pending++;
+            }
         } else {
-            // Message that doesn't need summarization (too short, excluded by settings, etc.)
-            stats.notApplicable++;
+            stats.inContext++;
         }
     }
     
@@ -2031,36 +2039,44 @@ function update_prediction_display() {
 function update_summary_stats_display() {
     const stats = collect_summarization_stats();
     
-    // Calculate percentages for progress bar
-    const total = stats.total || 1;  // Avoid division by zero
-    const pctDone = (stats.summarized / total) * 100;
-    const pctPending = (stats.pending / total) * 100;
-    const pctQueue = (stats.inQueue / total) * 100;
-    const pctActive = (stats.inContext / total) * 100;
-    const pctNA = (stats.notApplicable / total) * 100;
+    // Calculate truncated count (messages excluded from context)
+    const truncatedCount = stats.truncated;
     
-    // Update Overview tab stats card (matches HTML IDs: ct_ov_sum_*)
-    $('#ct_ov_sum_total').text(stats.total);
-    $('#ct_ov_sum_done').text(stats.summarized);
+    // Calculate summarization progress for truncated messages only
+    const summarizedCount = stats.summarized;
+    const progressPercent = truncatedCount > 0 ? (summarizedCount / truncatedCount) * 100 : 0;
+    
+    // Update Overview tab Summaries card (new design with mini progress bar)
+    $('#ct_ov_truncated_count').text(truncatedCount);
+    $('#ct_ov_sum_text').text(`${summarizedCount} / ${truncatedCount}`);
+    $('#ct_ov_sum_bar_fill').css('width', `${progressPercent}%`);
+    
+    // Legacy: Update old element IDs if they still exist (backwards compatibility)
+    $('#ct_ov_sum_total').text(truncatedCount);
+    $('#ct_ov_sum_done').text(summarizedCount);
     $('#ct_ov_sum_pending').text(stats.pending);
     $('#ct_ov_sum_queue').text(stats.inQueue);
     $('#ct_ov_sum_active').text(stats.inContext);
-    $('#ct_ov_sum_na').text(stats.notApplicable);
     
     // Update Truncation tab stats panel (matches HTML IDs: ct_sum_*_count)
-    $('#ct_sum_total_count').text(stats.total);
+    $('#ct_sum_total_count').text(stats.totalMessages);
     $('#ct_sum_done_count').text(stats.summarized);
     $('#ct_sum_pending_count').text(stats.pending);
     $('#ct_sum_queue_count').text(stats.inQueue);
     $('#ct_sum_active_count').text(stats.inContext);
-    $('#ct_sum_na_count').text(stats.notApplicable);
     
-    // Update progress bar segments
+    // Calculate percentages for progress bar (Truncation tab)
+    const total = stats.totalMessages || 1;  // Avoid division by zero
+    const pctDone = (stats.summarized / total) * 100;
+    const pctPending = (stats.pending / total) * 100;
+    const pctQueue = (stats.inQueue / total) * 100;
+    const pctActive = (stats.inContext / total) * 100;
+    
+    // Update progress bar segments (Truncation tab)
     $('#ct_sum_bar_done').css('width', `${pctDone}%`);
     $('#ct_sum_bar_pending').css('width', `${pctPending}%`);
     $('#ct_sum_bar_queue').css('width', `${pctQueue}%`);
     $('#ct_sum_bar_active').css('width', `${pctActive}%`);
-    $('#ct_sum_bar_na').css('width', `${pctNA}%`);
 }
 
 // Update the memory display in Overview tab
