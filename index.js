@@ -2797,19 +2797,19 @@ class SummaryQueue {
                 .replace(/\{\{user\}\}/g, ctx.name1 || 'User')
                 .replace(/\{\{char\}\}/g, ctx.name2 || 'Character');
             
-            // Generate summary using generateRaw with prefill
+            // Generate summary using generateRaw
             try {
                 // Create new AbortController for this generation
                 this.abortController = new AbortController();
                 
                 // generateRaw is imported from script.js at module level
-                debug(`Generating summary with prefill: "${speakerLabel}"`);
+                debug(`Generating summary for message ${index}`);
                 
-                // Use generateRaw with prefill to force response format
-                // The prefill starts the response with the speaker label, preventing <think> blocks
+                // Use generateRaw WITHOUT prefill - matches MessageSummarize's default behavior
+                // The prompt template already instructs the model to start with a speaker label
+                // Using prefill can cause immediate EOS token emission with some models
                 const result = await generateRaw({
                     prompt: prompt,
-                    prefill: speakerLabel + ' ',  // Start response with speaker label
                     // Note: generateRaw doesn't support abortSignal directly,
                     // but we check this.stopped before and after the call
                 });
@@ -2824,9 +2824,9 @@ class SummaryQueue {
                 this.abortController = null;
                 
                 if (result) {
-                    // The result should already start with the speaker label from prefill
-                    // Prepend the prefill since it's not included in the response
-                    let rawSummary = speakerLabel + ' ' + result;
+                    // The model should return a summary starting with the speaker label
+                    // as instructed in the prompt template
+                    let rawSummary = result;
                     
                     // Clean the output - remove any thinking content that might have snuck through
                     let summary = this.clean_summary_output(rawSummary);
