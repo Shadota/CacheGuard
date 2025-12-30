@@ -117,20 +117,33 @@ Recent chat always takes precedence over these notes.
     save_char_messages: true,
     per_chat_collection: true,
     
-    // Chunking settings (DEPRECATED - kept for backwards compatibility)
-    chunk_min_size: 1200,
-    chunk_max_size: 1500,
-    chunk_timeout: 30000,
+    // ==================== CHUNKED VECTORIZATION SETTINGS (V10) ====================
+    // Replaces old per-message and chunk settings for better roleplay memory
+    enable_chunked_vectorization: true,  // Group messages into conversational chunks
+    chunk_target_chars: 1200,            // Target characters per chunk
+    chunk_max_chars: 1800,               // Maximum characters before forcing flush
+    chunk_min_messages: 2,               // Minimum messages per chunk
+    chunk_max_messages: 8,               // Maximum messages per chunk
+    chunk_timeout_ms: 60000,             // Flush buffer after N ms of inactivity
+    chunk_scene_detection: true,         // Detect scene/topic boundaries
+    chunk_include_date_prefix: true,     // Add date prefix to chunks (aids temporal understanding)
     
-    // Per-message vectorization settings (NEW - replaces chunking)
+    // Per-message vectorization settings (fallback if chunking disabled)
     vectorization_delay: 2,           // Don't vectorize messages within N positions from end
     delete_on_message_delete: true,   // Delete Qdrant entries when messages are deleted
     auto_dedupe: true,                // Automatically remove duplicate entries during search
+    
+    // ==================== TEMPORAL SCORING SETTINGS (V10) ====================
+    enable_temporal_boost: true,      // Boost recent memories in search results
+    temporal_scale_days: 7,           // Time scale for decay (days until score is halved)
+    temporal_midpoint: 0.3,           // Minimum score multiplier for old memories (0-1)
+    temporal_prefetch_multiplier: 3,  // Fetch N times more results for re-ranking
     
     // ==================== SYNERGY SETTINGS ====================
     use_summaries_for_qdrant: false,
     memory_aware_summaries: false,
     account_qdrant_tokens: true,
+    summary_enhanced_chunks: true,    // Include summaries in chunk text when available
 };
 
 // Global state
@@ -3264,6 +3277,21 @@ function initialize_ui_listeners() {
     // Qdrant debug setting
     bind_setting('#ct_debug_qdrant', 'debug_qdrant', 'boolean');
     
+    // ==================== CHUNKED VECTORIZATION SETTINGS (V10) ====================
+    bind_setting('#ct_enable_chunked_vectorization', 'enable_chunked_vectorization', 'boolean');
+    bind_range_setting('#ct_chunk_target_chars', 'chunk_target_chars', '#ct_chunk_target_chars_display');
+    bind_range_setting('#ct_chunk_max_chars', 'chunk_max_chars', '#ct_chunk_max_chars_display');
+    bind_range_setting('#ct_chunk_min_messages', 'chunk_min_messages', '#ct_chunk_min_messages_display');
+    bind_range_setting('#ct_chunk_max_messages', 'chunk_max_messages', '#ct_chunk_max_messages_display');
+    bind_setting('#ct_chunk_scene_detection', 'chunk_scene_detection', 'boolean');
+    bind_setting('#ct_chunk_include_date_prefix', 'chunk_include_date_prefix', 'boolean');
+    bind_setting('#ct_summary_enhanced_chunks', 'summary_enhanced_chunks', 'boolean');
+    
+    // ==================== TEMPORAL SCORING SETTINGS (V10) ====================
+    bind_setting('#ct_enable_temporal_boost', 'enable_temporal_boost', 'boolean');
+    bind_range_setting('#ct_temporal_scale_days', 'temporal_scale_days', '#ct_temporal_scale_days_display');
+    bind_range_setting_float('#ct_temporal_midpoint', 'temporal_midpoint', '#ct_temporal_midpoint_display');
+    
     // ==================== SYNERGY SETTINGS ====================
     bind_setting('#ct_use_summaries_for_qdrant', 'use_summaries_for_qdrant', 'boolean');
     bind_setting('#ct_memory_aware_summaries', 'memory_aware_summaries', 'boolean');
@@ -3493,6 +3521,34 @@ function bind_range_setting_percent(selector, key, displaySelector) {
     $element.on('input', function() {
         const value = parseFloat($(this).val());
         $display.text(`${Math.round(value * 100)}%`);
+    });
+    
+    $element.on('change', function() {
+        const value = parseFloat($(this).val());
+        debug(`Setting [${key}] changed to [${value}]`);
+        set_settings(key, value);
+    });
+}
+
+// Bind range input with float display (for V10 settings like temporal_midpoint)
+function bind_range_setting_float(selector, key, displaySelector, decimals = 2) {
+    const $element = $(selector);
+    const $display = $(displaySelector);
+    
+    if ($element.length === 0) {
+        error(`No element found for selector [${selector}]`);
+        return;
+    }
+    
+    // Set initial value
+    const initialValue = get_settings(key);
+    $element.val(initialValue);
+    $display.text(initialValue.toFixed(decimals));
+    
+    // Listen for input (live update) and change (final value)
+    $element.on('input', function() {
+        const value = parseFloat($(this).val());
+        $display.text(value.toFixed(decimals));
     });
     
     $element.on('change', function() {
@@ -3762,88 +3818,171 @@ async function delete_current_collection() {
 
 // ==================== MEMORY BUFFER AND CHUNKING ====================
 
-// Memory buffer for accumulating messages before chunking
-class MemoryBuffer {
+// ==================== CONVERSATIONAL CHUNK BUFFER (V10) ====================
+// Intelligent message chunking for better roleplay memory quality
+
+// Scene boundary markers - indicate topic/scene changes
+const SCENE_MARKERS = [
+    /^[\*_]*\[?(?:scene|time|location|meanwhile|later|elsewhere|flashback|end|next)/i,
+    /^[\*_]*---+[\*_]*$/,  // Horizontal rules
+    /^[\*_]*\*{3,}[\*_]*$/,  // Asterisk dividers
+    /^[\*_]*~{3,}[\*_]*$/,  // Tilde dividers
+    /\[(?:OOC|Out of Character)\]/i,  // OOC markers
+    /^[\*_]*(?:Chapter|Part|Act)\s+\d/i,  // Chapter markers
+];
+
+class ConversationalChunkBuffer {
     constructor() {
         this.messages = [];
-        this.currentSize = 0;
+        this.currentCharCount = 0;
         this.timeoutHandle = null;
+        this.lastFlushTime = Date.now();
     }
     
     // Add a message to the buffer
     add(messageData) {
-        this.messages.push(messageData);
-        this.currentSize += messageData.text.length;
+        const ctx = getContext();
         
-        // Reset timeout
-        this.resetTimeout();
-        
-        // Check if we should flush
-        const maxSize = get_settings('chunk_max_size');
-        if (this.currentSize >= maxSize) {
-            return this.flush();
+        // Check for scene boundary before adding
+        if (this.messages.length > 0 && this.detectSceneBoundary(messageData)) {
+            // Flush current buffer before starting new scene
+            debug_qdrant('Scene boundary detected, flushing buffer');
+            const chunk = this.flush();
+            if (chunk) {
+                this.processChunkAsync(chunk);
+            }
         }
         
-        return null;
+        this.messages.push(messageData);
+        this.currentCharCount += messageData.text.length;
+        
+        // Reset inactivity timeout
+        this.resetTimeout();
+        
+        // Check flush conditions
+        const shouldFlush = this.checkFlushConditions();
+        
+        if (shouldFlush) {
+            const chunk = this.flush();
+            if (chunk) {
+                this.processChunkAsync(chunk);
+            }
+        }
+        
+        return null;  // Async processing, don't return chunk directly
     }
     
-    // Reset the flush timeout
+    // Check if we should flush based on various conditions
+    checkFlushConditions() {
+        const targetChars = get_settings('chunk_target_chars');
+        const maxChars = get_settings('chunk_max_chars');
+        const minMessages = get_settings('chunk_min_messages');
+        const maxMessages = get_settings('chunk_max_messages');
+        
+        // Force flush if over max characters
+        if (this.currentCharCount >= maxChars) {
+            debug_qdrant(`Flushing: over max chars (${this.currentCharCount} >= ${maxChars})`);
+            return true;
+        }
+        
+        // Force flush if over max messages
+        if (this.messages.length >= maxMessages) {
+            debug_qdrant(`Flushing: over max messages (${this.messages.length} >= ${maxMessages})`);
+            return true;
+        }
+        
+        // Flush if at target chars AND have minimum messages
+        if (this.currentCharCount >= targetChars && this.messages.length >= minMessages) {
+            debug_qdrant(`Flushing: at target chars with min messages`);
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Detect scene/topic boundaries
+    detectSceneBoundary(newMessage) {
+        if (!get_settings('chunk_scene_detection')) {
+            return false;
+        }
+        
+        const text = newMessage.text;
+        
+        // Check against scene marker patterns
+        for (const pattern of SCENE_MARKERS) {
+            if (pattern.test(text)) {
+                return true;
+            }
+        }
+        
+        // Check for significant time gap (if timestamps available)
+        if (newMessage.timestamp && this.messages.length > 0) {
+            const lastMsg = this.messages[this.messages.length - 1];
+            if (lastMsg.timestamp) {
+                const gap = newMessage.timestamp - lastMsg.timestamp;
+                // If more than 1 hour gap between messages, treat as scene boundary
+                if (gap > 60 * 60 * 1000) {
+                    debug_qdrant(`Time gap scene boundary: ${Math.round(gap / 60000)} minutes`);
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    // Reset the inactivity timeout
     resetTimeout() {
         if (this.timeoutHandle) {
             clearTimeout(this.timeoutHandle);
         }
         
-        const timeout = get_settings('chunk_timeout');
+        const timeout = get_settings('chunk_timeout_ms');
         this.timeoutHandle = setTimeout(() => {
-            const chunk = this.flush();
+            debug_qdrant('Chunk buffer timeout - flushing');
+            const chunk = this.forceFlush();
             if (chunk) {
-                // Process the chunk asynchronously
-                process_and_store_chunk(chunk).catch(e => {
-                    error('Failed to process chunk on timeout:', e);
-                });
+                this.processChunkAsync(chunk);
             }
         }, timeout);
     }
     
-    // Flush the buffer and return a chunk
-    flush() {
-        if (this.messages.length === 0) {
-            return null;
-        }
-        
-        const minSize = get_settings('chunk_min_size');
-        
-        // Don't flush if under minimum size (unless forced)
-        if (this.currentSize < minSize) {
-            debug_qdrant(`Buffer size ${this.currentSize} < min ${minSize}, not flushing`);
-            return null;
-        }
-        
-        // Create chunk from buffered messages
-        const chunk = this.createChunk();
-        
-        // Clear buffer
-        this.messages = [];
-        this.currentSize = 0;
-        
-        if (this.timeoutHandle) {
-            clearTimeout(this.timeoutHandle);
-            this.timeoutHandle = null;
-        }
-        
-        return chunk;
+    // Process chunk asynchronously (fire-and-forget)
+    processChunkAsync(chunk) {
+        process_and_store_chunk(chunk).catch(e => {
+            error('Failed to process chunk:', e);
+        });
     }
     
-    // Force flush regardless of size
+    // Flush the buffer if minimum requirements met
+    flush() {
+        const minMessages = get_settings('chunk_min_messages');
+        
+        if (this.messages.length < minMessages) {
+            debug_qdrant(`Buffer has ${this.messages.length} messages, need ${minMessages} minimum`);
+            return null;
+        }
+        
+        return this.createAndClearChunk();
+    }
+    
+    // Force flush regardless of minimum requirements (for timeouts, scene boundaries)
     forceFlush() {
         if (this.messages.length === 0) {
             return null;
         }
         
+        return this.createAndClearChunk();
+    }
+    
+    // Create chunk and clear buffer
+    createAndClearChunk() {
         const chunk = this.createChunk();
         
+        // Clear buffer
         this.messages = [];
-        this.currentSize = 0;
+        this.currentCharCount = 0;
+        this.lastFlushTime = Date.now();
         
         if (this.timeoutHandle) {
             clearTimeout(this.timeoutHandle);
@@ -3853,54 +3992,128 @@ class MemoryBuffer {
         return chunk;
     }
     
-    // Create a chunk from current messages
+    // Create a conversational chunk from buffered messages
     createChunk() {
         const ctx = getContext();
+        const chat = ctx.chat;
+        const includeDatePrefix = get_settings('chunk_include_date_prefix');
+        const useSummaryEnhanced = get_settings('summary_enhanced_chunks');
         
-        // Combine message texts
-        const texts = this.messages.map(m => {
-            const prefix = m.isUser ? (ctx.name1 || 'User') : (ctx.name2 || 'Character');
-            return `${prefix}: ${m.text}`;
-        });
+        // Build chunk text with speaker labels
+        const textParts = [];
         
-        const combinedText = texts.join('\n\n');
+        // Add date prefix if enabled (helps temporal understanding)
+        let datePrefix = '';
+        if (includeDatePrefix && this.messages.length > 0) {
+            const firstTimestamp = this.messages[0].timestamp || Date.now();
+            datePrefix = this.formatDatePrefix(firstTimestamp);
+            textParts.push(datePrefix);
+        }
+        
+        // Process each message
+        for (const m of this.messages) {
+            const speakerName = m.isUser ? (ctx.name1 || 'User') : (ctx.name2 || 'Character');
+            
+            // Check for summary if summary-enhanced chunks enabled
+            let messageText = m.text;
+            if (useSummaryEnhanced && chat[m.index]) {
+                const summary = get_memory(chat[m.index]);
+                if (summary) {
+                    // Use summary for denser semantic signal
+                    messageText = summary;
+                    debug_synergy(`Using summary for message ${m.index} in chunk`);
+                }
+            }
+            
+            textParts.push(`${speakerName}: ${messageText}`);
+        }
+        
+        const combinedText = textParts.join('\n\n');
         
         // Get temporal boundaries
         const firstMsg = this.messages[0];
         const lastMsg = this.messages[this.messages.length - 1];
         
+        // Generate unique chunk ID
+        const chunkId = generate_chunk_id();
+        
         return {
             text: combinedText,
+            chunkId: chunkId,
             messageIndexes: this.messages.map(m => m.index),
+            messageHashes: this.messages.map(m => m.hash),
             firstIndex: firstMsg.index,
             lastIndex: lastMsg.index,
             timestamp: Date.now(),
+            datePrefix: datePrefix,
             characterName: ctx.name2 || 'Unknown',
-            chatId: ctx.chatId
+            chatId: ctx.chatId,
+            messageCount: this.messages.length,
+            charCount: this.currentCharCount
         };
     }
     
-    // Get current buffer state
+    // Format a human-readable date prefix for the chunk
+    formatDatePrefix(timestamp) {
+        const date = new Date(timestamp);
+        const now = new Date();
+        const diffDays = Math.floor((now - date) / (24 * 60 * 60 * 1000));
+        
+        if (diffDays === 0) {
+            return `[Today]`;
+        } else if (diffDays === 1) {
+            return `[Yesterday]`;
+        } else if (diffDays < 7) {
+            return `[${diffDays} days ago]`;
+        } else if (diffDays < 30) {
+            const weeks = Math.floor(diffDays / 7);
+            return `[${weeks} week${weeks > 1 ? 's' : ''} ago]`;
+        } else {
+            const months = Math.floor(diffDays / 30);
+            return `[${months} month${months > 1 ? 's' : ''} ago]`;
+        }
+    }
+    
+    // Get current buffer state (for debugging/UI)
     getState() {
         return {
             messageCount: this.messages.length,
-            currentSize: this.currentSize,
-            hasTimeout: this.timeoutHandle !== null
+            currentCharCount: this.currentCharCount,
+            hasTimeout: this.timeoutHandle !== null,
+            lastFlushTime: this.lastFlushTime
         };
+    }
+    
+    // Clear the buffer without flushing
+    clear() {
+        this.messages = [];
+        this.currentCharCount = 0;
+        if (this.timeoutHandle) {
+            clearTimeout(this.timeoutHandle);
+            this.timeoutHandle = null;
+        }
     }
 }
 
-// Global memory buffer instance
-const memoryBuffer = new MemoryBuffer();
+// Generate unique chunk ID
+function generate_chunk_id() {
+    return `chunk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
 
-// Process and store a chunk to Qdrant
+// Global conversational chunk buffer instance
+const chunkBuffer = new ConversationalChunkBuffer();
+
+// Legacy MemoryBuffer for backwards compatibility (deprecated)
+const memoryBuffer = chunkBuffer;
+
+// Process and store a chunk to Qdrant (V10 enhanced)
 async function process_and_store_chunk(chunk) {
     if (!get_settings('qdrant_enabled')) {
         debug_qdrant('Qdrant disabled, skipping chunk storage');
         return;
     }
     
-    debug_qdrant(`Processing chunk: ${chunk.messageIndexes.length} messages, ${chunk.text.length} chars`);
+    debug_qdrant(`Processing chunk: ${chunk.messageIndexes?.length || 0} messages, ${chunk.text.length} chars`);
     
     try {
         // Generate embedding for the chunk
@@ -3910,32 +4123,65 @@ async function process_and_store_chunk(chunk) {
             throw new Error('Failed to generate embedding');
         }
         
-        // Ensure collection exists
+        // Ensure collection exists (with payload indexes)
         await ensure_collection_exists();
         
-        // Create point for Qdrant
+        // Create point for Qdrant with V10 enhanced payload
         const point = {
             id: generate_point_id(),
             vector: embedding,
             payload: {
+                // Core text
                 text: chunk.text,
-                message_indexes: chunk.messageIndexes,
+                
+                // V10: Chunk metadata
+                chunk_id: chunk.chunkId || generate_chunk_id(),
+                message_indexes: chunk.messageIndexes || [],
+                message_hashes: chunk.messageHashes || [],
                 first_index: chunk.firstIndex,
                 last_index: chunk.lastIndex,
-                timestamp: chunk.timestamp,
+                message_count: chunk.messageCount || chunk.messageIndexes?.length || 1,
+                char_count: chunk.charCount || chunk.text.length,
+                
+                // Temporal data
+                timestamp: chunk.timestamp || Date.now(),
+                date_prefix: chunk.datePrefix || '',
+                
+                // Context metadata
                 character_name: chunk.characterName,
-                chat_id: chunk.chatId
+                chat_id: chunk.chatId,
+                
+                // V10: Filtering helpers
+                is_chunk: true
             }
         };
         
         // Upsert to Qdrant
         await upsert_points([point]);
         
-        debug_qdrant(`Stored chunk with ${chunk.messageIndexes.length} messages to Qdrant`);
+        // Mark source messages as chunked
+        mark_messages_as_chunked(chunk.messageIndexes, chunk.chunkId);
+        
+        debug_qdrant(`Stored V10 chunk (${chunk.chunkId}) with ${chunk.messageIndexes?.length || 0} messages to Qdrant`);
         
     } catch (e) {
         error('Failed to process and store chunk:', e);
         throw e;
+    }
+}
+
+// Mark messages as included in a chunk
+function mark_messages_as_chunked(messageIndexes, chunkId) {
+    const ctx = getContext();
+    const chat = ctx.chat;
+    
+    if (!chat || !messageIndexes) return;
+    
+    for (const index of messageIndexes) {
+        if (chat[index]) {
+            set_data(chat[index], 'chunked', true);
+            set_data(chat[index], 'chunk_id', chunkId);
+        }
     }
 }
 
@@ -3951,7 +4197,7 @@ function generate_point_id() {
 
 // ==================== QDRANT STORAGE FUNCTIONS ====================
 
-// Ensure collection exists with correct configuration
+// Ensure collection exists with correct configuration and payload indexes
 async function ensure_collection_exists() {
     const url = get_settings('qdrant_url');
     const collection = get_current_collection_name();
@@ -3973,6 +4219,8 @@ async function ensure_collection_exists() {
         
         if (checkResponse.ok) {
             debug_qdrant(`Collection ${collection} already exists`);
+            // Ensure payload indexes exist (idempotent operation)
+            await ensure_payload_indexes(collection);
             return;
         }
         
@@ -3997,9 +4245,49 @@ async function ensure_collection_exists() {
         
         debug_qdrant(`Created collection ${collection}`);
         
+        // Create payload indexes for efficient filtering
+        await ensure_payload_indexes(collection);
+        
     } catch (e) {
         error('Failed to ensure collection exists:', e);
         throw e;
+    }
+}
+
+// Create payload indexes for efficient filtering (V10 enhancement)
+async function ensure_payload_indexes(collection) {
+    const url = get_settings('qdrant_url');
+    
+    const indexes = [
+        { field: 'chat_id', schema: { type: 'keyword', is_tenant: true } },  // Primary filter, tenant-optimized
+        { field: 'timestamp', schema: { type: 'integer' } },  // For temporal sorting/filtering
+        { field: 'message_hash', schema: { type: 'keyword' } },  // For deduplication
+        { field: 'is_user', schema: { type: 'bool' } },  // For filtering by message type
+        { field: 'chunk_id', schema: { type: 'keyword' } },  // For chunk-based operations
+    ];
+    
+    for (const index of indexes) {
+        try {
+            const response = await fetch(`${url}/collections/${collection}/index`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    field_name: index.field,
+                    field_schema: index.schema
+                })
+            });
+            
+            if (response.ok) {
+                debug_qdrant(`Created/verified index for ${index.field}`);
+            } else {
+                // Index may already exist with different schema - that's okay
+                const errorText = await response.text();
+                debug_qdrant(`Index ${index.field}: ${errorText}`);
+            }
+        } catch (e) {
+            debug_qdrant(`Failed to create index for ${index.field}:`, e);
+            // Non-fatal - continue with other indexes
+        }
     }
 }
 
@@ -4028,7 +4316,7 @@ async function upsert_points(points) {
     debug_qdrant(`Upserted ${points.length} points to ${collection}`);
 }
 
-// Search for similar memories
+// Search for similar memories with temporal scoring (V10 enhancement)
 async function search_memories(queryText, limit = null, scoreThreshold = null) {
     const url = get_settings('qdrant_url');
     const collection = get_current_collection_name();
@@ -4040,9 +4328,11 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
     limit = limit ?? get_settings('memory_limit');
     scoreThreshold = scoreThreshold ?? get_settings('score_threshold');
     
-    // Request extra results if deduplication is enabled (to have enough after removing duplicates)
+    // Request extra results for deduplication and temporal re-ranking
     const autoDedupe = get_settings('auto_dedupe');
-    const requestLimit = autoDedupe ? limit * 2 : limit;
+    const enableTemporalBoost = get_settings('enable_temporal_boost');
+    const prefetchMultiplier = enableTemporalBoost ? get_settings('temporal_prefetch_multiplier') : 1;
+    const requestLimit = Math.max(limit * prefetchMultiplier, autoDedupe ? limit * 2 : limit);
     
     try {
         // Generate embedding for query
@@ -4052,29 +4342,21 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
             throw new Error('Failed to generate query embedding');
         }
         
-        // Build search request
-        const searchBody = {
-            vector: queryEmbedding,
-            limit: requestLimit,
-            score_threshold: scoreThreshold,
-            with_payload: true
-        };
+        let results;
         
-        const response = await fetch(`${url}/collections/${collection}/points/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(searchBody)
-        });
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Search failed: ${errorText}`);
+        // Use temporal scoring if enabled
+        if (enableTemporalBoost) {
+            results = await search_with_temporal_scoring(
+                collection, queryEmbedding, requestLimit, scoreThreshold
+            );
+        } else {
+            // Standard search without temporal scoring
+            results = await search_standard(
+                collection, queryEmbedding, requestLimit, scoreThreshold
+            );
         }
         
-        const data = await response.json();
-        let results = data.result || [];
-        
-        debug_qdrant(`Search returned ${results.length} results`);
+        debug_qdrant(`Search returned ${results.length} results (temporal: ${enableTemporalBoost})`);
         
         // Detect and remove duplicates if enabled
         if (autoDedupe && results.length > 0) {
@@ -4094,47 +4376,191 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
         // Limit to requested count after deduplication
         results = results.slice(0, limit);
         
-        // Map results to common format (handle both old chunked format and new per-message format)
-        return results.map(r => {
-            const payload = r.payload;
-            
-            // Check for new per-message format (message_index) vs old chunked format (message_indexes)
-            if (payload.message_index !== undefined) {
-                // New per-message format
-                return {
-                    id: r.id,
-                    score: r.score,
-                    text: payload.text,
-                    messageIndex: payload.message_index,
-                    messageHash: payload.message_hash,
-                    isUser: payload.is_user,
-                    // For backwards compatibility, also provide first/last index
-                    firstIndex: payload.message_index,
-                    lastIndex: payload.message_index,
-                    timestamp: payload.timestamp,
-                    characterName: payload.character_name,
-                    chatId: payload.chat_id
-                };
-            } else {
-                // Old chunked format
-                return {
-                    id: r.id,
-                    score: r.score,
-                    text: payload.text,
-                    messageIndexes: payload.message_indexes,
-                    firstIndex: payload.first_index,
-                    lastIndex: payload.last_index,
-                    timestamp: payload.timestamp,
-                    characterName: payload.character_name,
-                    chatId: payload.chat_id
-                };
-            }
-        });
+        // Map results to common format (handle all formats: per-message, chunk, v10 chunk)
+        return results.map(r => map_search_result_to_memory(r));
         
     } catch (e) {
         error('Failed to search memories:', e);
         throw e;
     }
+}
+
+// Standard search without temporal scoring
+async function search_standard(collection, queryEmbedding, limit, scoreThreshold) {
+    const url = get_settings('qdrant_url');
+    
+    const searchBody = {
+        vector: queryEmbedding,
+        limit: limit,
+        score_threshold: scoreThreshold,
+        with_payload: true
+    };
+    
+    const response = await fetch(`${url}/collections/${collection}/points/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchBody)
+    });
+    
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Search failed: ${errorText}`);
+    }
+    
+    const data = await response.json();
+    return data.result || [];
+}
+
+// Search with temporal scoring using Qdrant's Query API (V10)
+// Uses prefetch + formula pattern for time-boosted relevance
+async function search_with_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold) {
+    const url = get_settings('qdrant_url');
+    const scaleDays = get_settings('temporal_scale_days');
+    const midpoint = get_settings('temporal_midpoint');
+    
+    // Calculate decay constant: ln(2) / scale_days_in_ms
+    // For a 7-day scale, memories lose half their boost after 7 days
+    const scaleMs = scaleDays * 24 * 60 * 60 * 1000;
+    const decayConstant = Math.log(2) / scaleMs;
+    const now = Date.now();
+    
+    // Build query with temporal formula
+    // Formula: semantic_score * (midpoint + (1 - midpoint) * exp(-decay * age))
+    // This ensures old memories still get at least midpoint% of their original score
+    const queryBody = {
+        prefetch: {
+            query: queryEmbedding,
+            limit: limit,
+            score_threshold: scoreThreshold,
+            using: ""  // Use default vector
+        },
+        query: {
+            // Re-score using formula that combines semantic similarity with recency
+            // The formula boosts recent memories while maintaining a floor for older ones
+            formula: {
+                // Final score = semantic_score * temporal_multiplier
+                // temporal_multiplier = midpoint + (1 - midpoint) * exp(-decay * (now - timestamp))
+                expr: `$score * (${midpoint} + ${1 - midpoint} * exp(-${decayConstant} * (${now} - payload.timestamp)))`
+            }
+        },
+        limit: limit,
+        with_payload: true
+    };
+    
+    try {
+        const response = await fetch(`${url}/collections/${collection}/points/query`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(queryBody)
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            // If Query API fails (older Qdrant version), fall back to standard search with client-side temporal re-ranking
+            debug_qdrant(`Query API failed (${errorText}), falling back to client-side temporal scoring`);
+            return await search_with_client_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold);
+        }
+        
+        const data = await response.json();
+        return data.result || [];
+        
+    } catch (e) {
+        debug_qdrant(`Query API error, falling back to client-side temporal scoring:`, e);
+        return await search_with_client_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold);
+    }
+}
+
+// Fallback: Client-side temporal re-ranking for older Qdrant versions
+async function search_with_client_temporal_scoring(collection, queryEmbedding, limit, scoreThreshold) {
+    const scaleDays = get_settings('temporal_scale_days');
+    const midpoint = get_settings('temporal_midpoint');
+    const scaleMs = scaleDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    
+    // Get more results than needed for re-ranking
+    const results = await search_standard(collection, queryEmbedding, limit * 3, scoreThreshold);
+    
+    // Apply temporal scoring client-side
+    const scoredResults = results.map(r => {
+        const timestamp = r.payload?.timestamp || 0;
+        const age = now - timestamp;
+        const temporalMultiplier = midpoint + (1 - midpoint) * Math.exp(-Math.log(2) * age / scaleMs);
+        
+        return {
+            ...r,
+            originalScore: r.score,
+            score: r.score * temporalMultiplier,
+            temporalMultiplier: temporalMultiplier
+        };
+    });
+    
+    // Sort by new score and return top results
+    scoredResults.sort((a, b) => b.score - a.score);
+    
+    debug_qdrant(`Client-side temporal re-ranking applied to ${results.length} results`);
+    
+    return scoredResults.slice(0, limit);
+}
+
+// Map a raw search result to a standardized memory object
+function map_search_result_to_memory(r) {
+    const payload = r.payload;
+    
+    // V10 chunk format (new)
+    if (payload.chunk_id !== undefined) {
+        return {
+            id: r.id,
+            score: r.score,
+            originalScore: r.originalScore,  // May be present from client-side temporal scoring
+            temporalMultiplier: r.temporalMultiplier,
+            text: payload.text,
+            chunkId: payload.chunk_id,
+            messageIndexes: payload.message_indexes || [],
+            firstIndex: payload.first_index,
+            lastIndex: payload.last_index,
+            timestamp: payload.timestamp,
+            characterName: payload.character_name,
+            chatId: payload.chat_id,
+            datePrefix: payload.date_prefix,
+            isChunk: true
+        };
+    }
+    
+    // Per-message format (message_index singular)
+    if (payload.message_index !== undefined) {
+        return {
+            id: r.id,
+            score: r.score,
+            originalScore: r.originalScore,
+            temporalMultiplier: r.temporalMultiplier,
+            text: payload.text,
+            messageIndex: payload.message_index,
+            messageHash: payload.message_hash,
+            isUser: payload.is_user,
+            firstIndex: payload.message_index,
+            lastIndex: payload.message_index,
+            timestamp: payload.timestamp,
+            characterName: payload.character_name,
+            chatId: payload.chat_id,
+            isChunk: false
+        };
+    }
+    
+    // Old chunked format (message_indexes plural, no chunk_id)
+    return {
+        id: r.id,
+        score: r.score,
+        originalScore: r.originalScore,
+        temporalMultiplier: r.temporalMultiplier,
+        text: payload.text,
+        messageIndexes: payload.message_indexes,
+        firstIndex: payload.first_index,
+        lastIndex: payload.last_index,
+        timestamp: payload.timestamp,
+        characterName: payload.character_name,
+        chatId: payload.chat_id,
+        isChunk: true
+    };
 }
 
 // Get collection info
@@ -4164,15 +4590,65 @@ async function get_collection_info() {
     }
 }
 
-// Add a message to the memory buffer (DEPRECATED - kept for backwards compatibility)
+// ==================== MESSAGE BUFFERING AND VECTORIZATION (V10) ====================
+
+// Add a message to the buffer for chunked vectorization or direct vectorization
 function buffer_message(index, text, isUser) {
-    // Redirect to new per-message vectorization
-    vectorize_message(index, text, isUser);
+    if (!get_settings('qdrant_enabled')) return;
+    if (!get_settings('auto_save_memories')) return;
+    if (isUser && !get_settings('save_user_messages')) return;
+    if (!isUser && !get_settings('save_char_messages')) return;
+    
+    const ctx = getContext();
+    const message = ctx.chat[index];
+    
+    if (!message) {
+        debug_qdrant(`Message ${index} not found, skipping buffer`);
+        return;
+    }
+    
+    // Check if chunked vectorization is enabled
+    if (get_settings('enable_chunked_vectorization')) {
+        // Use V10 chunked approach
+        buffer_message_for_chunking(index, text, isUser, message);
+    } else {
+        // Fall back to per-message vectorization
+        vectorize_message(index, text, isUser);
+    }
 }
 
-// ==================== PER-MESSAGE VECTORIZATION (NEW) ====================
+// Buffer a message for chunked vectorization (V10)
+function buffer_message_for_chunking(index, text, isUser, message) {
+    // Check vectorization delay
+    const ctx = getContext();
+    const delay = get_settings('vectorization_delay');
+    if (index >= ctx.chat.length - delay) {
+        debug_qdrant(`Message ${index} within delay window (${delay}), skipping buffer`);
+        return;
+    }
+    
+    // Check if already chunked
+    if (get_data(message, 'chunked')) {
+        debug_qdrant(`Message ${index} already chunked, skipping`);
+        return;
+    }
+    
+    // Create message hash for deduplication
+    const messageHash = getStringHash(text);
+    
+    // Add to chunk buffer
+    chunkBuffer.add({
+        index: index,
+        text: text,
+        isUser: isUser,
+        timestamp: Date.now(),
+        hash: messageHash
+    });
+    
+    debug_qdrant(`Buffered message ${index} for chunking (buffer: ${chunkBuffer.getState().messageCount} messages)`);
+}
 
-// Vectorize a single message and store it in Qdrant
+// Vectorize a single message directly (legacy/fallback mode)
 async function vectorize_message(index, text, isUser) {
     if (!get_settings('qdrant_enabled')) return;
     if (!get_settings('auto_save_memories')) return;
@@ -4187,9 +4663,9 @@ async function vectorize_message(index, text, isUser) {
         return;
     }
     
-    // Check if already vectorized
-    if (get_data(message, 'vectorized')) {
-        debug_qdrant(`Message ${index} already vectorized, skipping`);
+    // Check if already vectorized or chunked
+    if (get_data(message, 'vectorized') || get_data(message, 'chunked')) {
+        debug_qdrant(`Message ${index} already vectorized/chunked, skipping`);
         return;
     }
     
@@ -4224,7 +4700,7 @@ async function vectorize_message(index, text, isUser) {
         // Create message hash for deduplication and deletion
         const messageHash = getStringHash(text);
         
-        // Create point
+        // Create point with V10 payload structure
         const point = {
             id: generate_point_id(),
             vector: embedding,
@@ -4235,7 +4711,8 @@ async function vectorize_message(index, text, isUser) {
                 is_user: isUser,
                 timestamp: Date.now(),
                 chat_id: ctx.chatId,
-                character_name: ctx.name2 || 'Unknown'
+                character_name: ctx.name2 || 'Unknown',
+                is_chunk: false  // V10: Mark as per-message, not chunked
             }
         };
         
@@ -4253,7 +4730,7 @@ async function vectorize_message(index, text, isUser) {
     }
 }
 
-// Vectorize messages that were previously skipped due to delay
+// Vectorize/chunk messages that were previously skipped due to delay
 async function vectorize_delayed_messages() {
     if (!get_settings('qdrant_enabled')) return;
     if (!get_settings('auto_save_memories')) return;
@@ -4265,10 +4742,11 @@ async function vectorize_delayed_messages() {
     
     const delay = get_settings('vectorization_delay');
     const threshold = chat.length - delay;
+    const useChunking = get_settings('enable_chunked_vectorization');
     
-    debug_qdrant(`Checking for delayed messages to vectorize (threshold: ${threshold})`);
+    debug_qdrant(`Checking for delayed messages (threshold: ${threshold}, chunking: ${useChunking})`);
     
-    let vectorized = 0;
+    let processed = 0;
     
     for (let i = 0; i < threshold; i++) {
         const message = chat[i];
@@ -4276,20 +4754,37 @@ async function vectorize_delayed_messages() {
         // Skip system messages
         if (message.is_system) continue;
         
-        // Skip already vectorized
-        if (get_data(message, 'vectorized')) continue;
+        // Skip already processed
+        if (get_data(message, 'vectorized') || get_data(message, 'chunked')) continue;
         
         // Check message type settings
         if (message.is_user && !get_settings('save_user_messages')) continue;
         if (!message.is_user && !get_settings('save_char_messages')) continue;
         
-        // Vectorize this message
-        await vectorize_message(i, message.mes, message.is_user);
-        vectorized++;
+        if (useChunking) {
+            // Buffer for chunking
+            buffer_message_for_chunking(i, message.mes, message.is_user, message);
+        } else {
+            // Direct vectorization
+            await vectorize_message(i, message.mes, message.is_user);
+        }
+        processed++;
     }
     
-    if (vectorized > 0) {
-        debug_qdrant(`Vectorized ${vectorized} delayed messages`);
+    // If using chunking, force flush any remaining buffer after processing delayed messages
+    if (useChunking && processed > 0) {
+        const chunk = chunkBuffer.forceFlush();
+        if (chunk) {
+            try {
+                await process_and_store_chunk(chunk);
+            } catch (e) {
+                error('Failed to process final chunk:', e);
+            }
+        }
+    }
+    
+    if (processed > 0) {
+        debug_qdrant(`Processed ${processed} delayed messages (chunking: ${useChunking})`);
     }
 }
 
@@ -4464,7 +4959,7 @@ async function index_current_chat() {
     let chunks = [];
     
     // Create temporary buffer for indexing
-    const indexBuffer = new MemoryBuffer();
+    const indexBuffer = new ConversationalChunkBuffer();
     
     for (let i = 0; i < chat.length; i++) {
         // Check if stop was requested
