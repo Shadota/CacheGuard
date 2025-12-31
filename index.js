@@ -222,6 +222,10 @@ let LAST_CHAT_LENGTH = 0;         // Track chat length to detect deletions
 let LAST_CHAT_HASHES = new Map(); // Map of message index -> content hash for edit detection
 const DELETION_TOLERANCE = 3;     // Max deletions before soft recalibration
 
+// V29: Pre-snapshot state for deletion detection (fixes race condition)
+let PRE_SNAPSHOT_CHAT_LENGTH = 0;
+let PRE_SNAPSHOT_CHAT_HASHES = new Map();
+
 // ==================== TEMPORAL SEARCH FUNCTION REGISTRY (V13) ====================
 // These function references ensure temporal search is available in all execution contexts
 // including when called from globalThis.truncator_intercept_messages
@@ -591,6 +595,10 @@ function snapshot_chat_state() {
     const ctx = getContext();
     const chat = ctx.chat;
     
+    // V29 FIX: Preserve pre-snapshot state for deletion detection (fixes race condition)
+    PRE_SNAPSHOT_CHAT_LENGTH = LAST_CHAT_LENGTH;
+    PRE_SNAPSHOT_CHAT_HASHES = new Map(LAST_CHAT_HASHES);
+    
     if (!chat) {
         LAST_CHAT_LENGTH = 0;
         LAST_CHAT_HASHES.clear();
@@ -615,7 +623,9 @@ function handle_message_deleted() {
     const ctx = getContext();
     const chat = ctx.chat;
     const currentLength = chat ? chat.length : 0;
-    const deletedCount = LAST_CHAT_LENGTH - currentLength;
+    
+    // V29 FIX: Use PRE_SNAPSHOT state (before CHAT_CHANGED updated it)
+    const deletedCount = PRE_SNAPSHOT_CHAT_LENGTH - currentLength;
     
     if (deletedCount <= 0) {
         // No deletion detected or chat grew
@@ -625,15 +635,15 @@ function handle_message_deleted() {
     
     debug_trunc(`═══ MESSAGE DELETION DETECTED ═══`);
     debug_trunc(`  Deleted: ${deletedCount} message(s)`);
-    debug_trunc(`  Previous length: ${LAST_CHAT_LENGTH}, Current: ${currentLength}`);
+    debug_trunc(`  Previous length: ${PRE_SNAPSHOT_CHAT_LENGTH}, Current: ${currentLength}`);
     
     // Determine deletion location relative to truncation index
     let deletionsBeforeTruncation = 0;
     let deletionsAfterTruncation = 0;
     
     if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
-        // Detect where deletions occurred using hash comparison
-        const oldHash = LAST_CHAT_HASHES.get(TRUNCATION_INDEX);
+        // V29 FIX: Detect where deletions occurred using PRE_SNAPSHOT hash (before CHAT_CHANGED)
+        const oldHash = PRE_SNAPSHOT_CHAT_HASHES.get(TRUNCATION_INDEX);
         const newMessage = chat[TRUNCATION_INDEX];
         const newHash = newMessage ? compute_message_hash(newMessage) : null;
         
@@ -956,6 +966,34 @@ function calculate_truncation_index() {
         return total;
     }
     
+    // V29: Estimate chat size WITHOUT correction factor (for accurate factor calculation)
+    function estimateChatSizeRaw(startIndex) {
+        let total = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const message = chat[i];
+            
+            // Skip system messages
+            if (message.is_system) continue;
+            
+            // Messages before startIndex are excluded (lagging)
+            // Messages at or after startIndex are kept in full
+            const lagging = i < startIndex;
+            if (!lagging) {
+                // Kept message - use RAW token count (no correction factor)
+                const rawEstimate = estimateMessagePromptTokens(message, i);
+                total += rawEstimate;  // V29: No correction factor applied
+                continue;
+            }
+            
+            // Excluded message - use summary if available
+            const summary = get_memory(message);
+            if (summary && check_message_exclusion(message)) {
+                total += count_tokens(summary) + sepSize;
+            }
+        }
+        return total;
+    }
+    
     // Current chat size
     let currentChatSize = estimateChatSize(currentIndex);
     
@@ -1099,6 +1137,7 @@ function calculate_truncation_index() {
     }
     
     const predictedChatSize = estimateChatSize(finalIndex);
+    const predictedChatSizeRaw = estimateChatSizeRaw(finalIndex);  // V29: Raw prediction for factor calculation
     const predictedTotal = predictedChatSize + nonChatBudget;
     
     debug_trunc(`  `);
@@ -1108,7 +1147,7 @@ function calculate_truncation_index() {
     debug_trunc(`  `);
     debug_trunc(`  === FINAL RESULT ===`);
     debug_trunc(`  New truncation index: ${finalIndex} (was ${currentIndex}, ${finalIndex > currentIndex ? '+' + (finalIndex - currentIndex) + ' messages excluded' : 'no change'})`);
-    debug_trunc(`  Predicted chat size: ${predictedChatSize} tokens`);
+    debug_trunc(`  Predicted chat size: ${predictedChatSize} tokens (raw: ${predictedChatSizeRaw})`);
     debug_trunc(`  Predicted total: ${predictedTotal} tokens`);
     debug_trunc(`  ${predictedTotal <= targetSize ? 'Under' : 'Over'} target by: ${Math.abs(predictedTotal - targetSize)} tokens`);
     debug_trunc(`═══ TRUNCATION CALCULATION END ═══`);
@@ -1117,6 +1156,7 @@ function calculate_truncation_index() {
     // Store predictions for comparison with actual results
     LAST_PREDICTED_SIZE = predictedTotal;
     LAST_PREDICTED_CHAT_SIZE = predictedChatSize;
+    LAST_PREDICTED_CHAT_SIZE_RAW = predictedChatSizeRaw;  // V29: Store raw for correction factor calculation
     LAST_PREDICTED_NON_CHAT_SIZE = nonChatBudget;
     
     return finalIndex;
@@ -1319,6 +1359,7 @@ let CURRENT_CONTEXT_SIZE = 0;
 let LAST_ACTUAL_PROMPT_SIZE = 0;
 let LAST_PREDICTED_SIZE = 0;
 let LAST_PREDICTED_CHAT_SIZE = 0;
+let LAST_PREDICTED_CHAT_SIZE_RAW = 0;  // V29: Uncorrected value for factor calculation
 let LAST_PREDICTED_NON_CHAT_SIZE = 0;
 
 // Cache for valid Overview tab data to prevent wild utilization swings
@@ -1422,8 +1463,9 @@ function update_status_display() {
         const actualChatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
         const actualNonChatTokens = actualSize - actualChatTokens;
         
-        // Calculate correction factor: actual / predicted
-        const newCorrectionFactor = actualChatTokens / LAST_PREDICTED_CHAT_SIZE;
+        // V29 FIX: Calculate correction factor using RAW prediction (not corrected)
+        // This breaks the feedback loop where corrected predictions caused factor convergence to sqrt(target)
+        const newCorrectionFactor = actualChatTokens / LAST_PREDICTED_CHAT_SIZE_RAW;
         const oldCorrectionFactor = CHAT_TOKEN_CORRECTION_FACTOR;
         
         // Fix 2.1: Adaptive EMA alpha based on error magnitude
