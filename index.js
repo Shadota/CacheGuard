@@ -1764,10 +1764,13 @@ function calculate_world_rules_tokens(raw_prompt) {
 function update_overview_tab() {
     const last_raw_prompt = get_last_prompt_raw();
     const maxContext = getMaxContextSize();
-    
+
+    // Declare actualSize at function scope with default
+    let actualSize = 0;
+
     // Update Gauge
     if (last_raw_prompt && maxContext > 0) {
-        const actualSize = count_tokens(last_raw_prompt);
+        actualSize = count_tokens(last_raw_prompt);
         const utilization = (actualSize / maxContext * 100);
         
         // Sanity check - utilization should be between 0 and 150%
@@ -1808,7 +1811,8 @@ function update_overview_tab() {
     }
 
     // Update Breakdown Bar (now includes World Rules)
-    if (last_raw_prompt) {
+    // Only calculate breakdown if we have a valid actualSize and maxContext
+    if (last_raw_prompt && actualSize > 0 && maxContext > 0) {
         const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         const chatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
         const worldRulesTokens = calculate_world_rules_tokens(last_raw_prompt);
@@ -2793,117 +2797,129 @@ class SummaryQueue {
     
     // Clean summary output - extract only the actual summary, strip thinking content
     clean_summary_output(text) {
-        if (!text) return '';
-        
-        let cleaned = text.trim();
-        
-        // Remove complete <think>...</think> blocks first (including content)
-        cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        
-        // Remove orphaned think tags and everything after them
-        const orphanedThinkMatch = cleaned.match(/<\/?think>/i);
-        if (orphanedThinkMatch) {
-            cleaned = cleaned.substring(0, orphanedThinkMatch.index).trim();
-        }
-        
-        // Patterns that indicate reasoning/thinking content (truncate at these)
-        const thinkingPatterns = [
-            /\n\s*Hmm,/i,                    // "Hmm," reasoning start
-            /\n\s*Let me/i,                  // "Let me" reasoning start
-            /\n\s*Looking at/i,              // "Looking at" reasoning
-            /\n\s*I need to/i,               // "I need to" reasoning
-            /\n\s*First,/i,                  // "First," step-by-step
-            /\n\s*The (user|message|speaker)/i,  // "The user/message/speaker" analysis
-            /\n\s*Breaking down/i,           // Analysis phrase
-            /\n\s*I'll/i,                    // "I'll" planning
-            /\n\s*I think/i,                 // "I think" reasoning
-            /\n\s*Now,/i,                    // "Now," step
-            /\n\s*For the/i,                 // "For the" analysis
-            /\n\s*This (captures|covers|summarizes)/i,  // Meta-commentary
-            /\n\s*Perfect!/i,                // Self-congratulation
-            /\n\s*That's/i,                  // Self-evaluation
-            /\n\s*\(\d+\s*words?\)/i,        // Word count markers like "(45 words)"
-            /\n\s*I've/i,                    // "I've" reasoning
-            /\n\s*Analyzing/i,               // Analysis marker
-            /\n\s*The key/i,                 // "The key" analysis
-        ];
-        
-        for (const pattern of thinkingPatterns) {
-            const match = cleaned.match(pattern);
-            if (match) {
-                cleaned = cleaned.substring(0, match.index).trim();
+        try {
+            if (!text) return '';
+            
+            let cleaned = text.trim();
+            
+            // Remove complete <think>...</think> blocks first (including content)
+            cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+            
+            // Remove orphaned think tags and everything after them
+            const orphanedThinkMatch = cleaned.match(/<\/?think>/i);
+            if (orphanedThinkMatch) {
+                cleaned = cleaned.substring(0, orphanedThinkMatch.index).trim();
             }
-        }
-        
-        // Remove word count annotations like "(45 words)" anywhere in text
-        cleaned = cleaned.replace(/\s*\(\d+\s*words?\)\s*/gi, '').trim();
-        
-        // Split on double newlines and take first meaningful paragraph
-        const paragraphs = cleaned.split(/\n\n+/);
-        for (const para of paragraphs) {
-            const trimmedPara = para.trim();
-            // Skip empty paragraphs and those that look like meta-content
-            if (trimmedPara && trimmedPara.length > 10 &&
-                !trimmedPara.toLowerCase().startsWith('hmm') &&
-                !trimmedPara.toLowerCase().startsWith('let me') &&
-                !trimmedPara.toLowerCase().startsWith('i need')) {
-                cleaned = trimmedPara;
-                break;
+            
+            // Patterns that indicate reasoning/thinking content (truncate at these)
+            const thinkingPatterns = [
+                /\n\s*Hmm,/i,                    // "Hmm," reasoning start
+                /\n\s*Let me/i,                  // "Let me" reasoning start
+                /\n\s*Looking at/i,              // "Looking at" reasoning
+                /\n\s*I need to/i,               // "I need to" reasoning
+                /\n\s*First,/i,                  // "First," step-by-step
+                /\n\s*The (user|message|speaker)/i,  // "The user/message/speaker" analysis
+                /\n\s*Breaking down/i,           // Analysis phrase
+                /\n\s*I'll/i,                    // "I'll" planning
+                /\n\s*I think/i,                 // "I think" reasoning
+                /\n\s*Now,/i,                    // "Now," step
+                /\n\s*For the/i,                 // "For the" analysis
+                /\n\s*This (captures|covers|summarizes)/i,  // Meta-commentary
+                /\n\s*Perfect!/i,                // Self-congratulation
+                /\n\s*That's/i,                  // Self-evaluation
+                /\n\s*\(\d+\s*words?\)/i,        // Word count markers like "(45 words)"
+                /\n\s*I've/i,                    // "I've" reasoning
+                /\n\s*Analyzing/i,               // Analysis marker
+                /\n\s*The key/i,                 // "The key" analysis
+            ];
+            
+            for (const pattern of thinkingPatterns) {
+                const match = cleaned.match(pattern);
+                if (match) {
+                    cleaned = cleaned.substring(0, match.index).trim();
+                }
             }
+            
+            // Remove word count annotations like "(45 words)" anywhere in text
+            cleaned = cleaned.replace(/\s*\(\d+\s*words?\)\s*/gi, '').trim();
+            
+            // Split on double newlines and take first meaningful paragraph
+            const paragraphs = cleaned.split(/\n\n+/);
+            for (const para of paragraphs) {
+                const trimmedPara = para.trim();
+                // Skip empty paragraphs and those that look like meta-content
+                if (trimmedPara && trimmedPara.length > 10 &&
+                    !trimmedPara.toLowerCase().startsWith('hmm') &&
+                    !trimmedPara.toLowerCase().startsWith('let me') &&
+                    !trimmedPara.toLowerCase().startsWith('i need')) {
+                    cleaned = trimmedPara;
+                    break;
+                }
+            }
+            
+            // Take only the first line if multiple lines remain (summary should be one sentence)
+            const firstLine = cleaned.split('\n')[0].trim();
+            if (firstLine && firstLine.length > 10) {
+                cleaned = firstLine;
+            }
+            
+            // Remove any leading/trailing quotes that might have been added
+            cleaned = cleaned.replace(/^["']|["']$/g, '').trim();
+            
+            return cleaned;
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] clean_summary_output error:`, e);
+            try { toastr.error(`Summary cleaning failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+            return '';
         }
-        
-        // Take only the first line if multiple lines remain (summary should be one sentence)
-        const firstLine = cleaned.split('\n')[0].trim();
-        if (firstLine && firstLine.length > 10) {
-            cleaned = firstLine;
-        }
-        
-        // Remove any leading/trailing quotes that might have been added
-        cleaned = cleaned.replace(/^["']|["']$/g, '').trim();
-        
-        return cleaned;
     }
     
     // Build context block from previous message's summary for better summarization accuracy
     // This helps the model understand references and pronouns in the current message
     build_context_block(currentIndex, ctx) {
-        // No context for first message
-        if (currentIndex <= 0) {
+        try {
+            // No context for first message
+            if (currentIndex <= 0) {
+                return '';
+            }
+
+            const chat = ctx.chat;
+
+            // Look for the previous non-system message
+            let prevIndex = currentIndex - 1;
+            while (prevIndex >= 0 && chat[prevIndex]?.is_system) {
+                prevIndex--;
+            }
+
+            if (prevIndex < 0) {
+                return '';  // No previous non-system message found
+            }
+
+            const prevMessage = chat[prevIndex];
+            const prevSummary = get_memory(prevMessage);
+
+            if (!prevSummary) {
+                debug(`No previous summary available for context (message ${prevIndex})`);
+                return '';  // No summary available for previous message
+            }
+
+            // Build the context block with clear labeling
+            const contextBlock = `[PREVIOUS CONTEXT - For reference only, DO NOT summarize this section]
+    The following summary is from the preceding message to help you understand references and pronouns.
+    
+    Previous Summary: ${prevSummary}
+    
+    [/PREVIOUS CONTEXT]
+    
+    `;
+
+            debug(`Added context from message ${prevIndex}: "${prevSummary.substring(0, 50)}..."`);
+            return contextBlock;
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] build_context_block error:`, e);
+            try { toastr.error(`Context build failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
             return '';
         }
-        
-        const chat = ctx.chat;
-        
-        // Look for the previous non-system message
-        let prevIndex = currentIndex - 1;
-        while (prevIndex >= 0 && chat[prevIndex]?.is_system) {
-            prevIndex--;
-        }
-        
-        if (prevIndex < 0) {
-            return '';  // No previous non-system message found
-        }
-        
-        const prevMessage = chat[prevIndex];
-        const prevSummary = get_memory(prevMessage);
-        
-        if (!prevSummary) {
-            debug(`No previous summary available for context (message ${prevIndex})`);
-            return '';  // No summary available for previous message
-        }
-        
-        // Build the context block with clear labeling
-        const contextBlock = `[PREVIOUS CONTEXT - For reference only, DO NOT summarize this section]
-The following summary is from the preceding message to help you understand references and pronouns.
-
-Previous Summary: ${prevSummary}
-
-[/PREVIOUS CONTEXT]
-
-`;
-        
-        debug(`Added context from message ${prevIndex}: "${prevSummary.substring(0, 50)}..."`);
-        return contextBlock;
     }
     
     async summarize_message(index) {
@@ -2961,8 +2977,19 @@ Previous Summary: ${prevSummary}
             
             // === CONTEXT INJECTION ===
             // Get previous message's summary for context (helps with references/pronouns)
-            const contextBlock = this.build_context_block(index, ctx);
-            
+            let contextBlock = '';
+            try {
+                const cb = this.build_context_block(index, ctx);
+                contextBlock = (typeof cb === 'string') ? cb : '';
+                if (!contextBlock && cb) {
+                    debug(`build_context_block returned non-string for message ${index}, ignoring`);
+                }
+            } catch (e) {
+                console.error(`[${MODULE_NAME_FANCY}] build_context_block threw:`, e);
+                try { toastr.error(`Context build failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                contextBlock = '';
+            }
+
             let prompt = prompt_template
                 .replace(/\{\{message\}\}/g, message.mes)
                 .replace(/\{\{words\}\}/g, max_words)
@@ -2981,11 +3008,32 @@ Previous Summary: ${prevSummary}
                 // Use generateRaw WITHOUT prefill - matches MessageSummarize's default behavior
                 // The prompt template already instructs the model to start with a speaker label
                 // Using prefill can cause immediate EOS token emission with some models
-                const result = await generateRaw({
-                    prompt: prompt,
-                    // Note: generateRaw doesn't support abortSignal directly,
-                    // but we check this.stopped before and after the call
-                });
+                let result = null;
+                try {
+                    result = await generateRaw({
+                        prompt: prompt,
+                        // Note: generateRaw doesn't support abortSignal directly,
+                        // but we check this.stopped before and after the call
+                    });
+                } catch (e) {
+                    // Surface unexpected generation errors to the user and record on the message
+                    console.error(`[${MODULE_NAME_FANCY}]`, `generateRaw failed for message ${index}:`, e);
+                    set_data(message, 'error', String(e));
+                    try {
+                        toastr.error(`Summarization generation failed for message ${index}: ${e.message || String(e)}`, MODULE_NAME_FANCY);
+                    } catch (toastErr) {
+                        console.error(`[${MODULE_NAME_FANCY}] toastr error:`, toastErr);
+                    }
+                    this.abortController = null;
+                    return;
+                }
+                
+                // Check if stopped during generation
+                if (this.stopped) {
+                    debug(`Summarization stopped during generation of message ${index}`);
+                    this.abortController = null;
+                    return;
+                }
                 
                 // Check if stopped during generation
                 if (this.stopped) {
@@ -3032,16 +3080,23 @@ Previous Summary: ${prevSummary}
                     debug(`Summarized message ${index}: "${summary}"`);
                 }
             } catch (e) {
-                // Don't log error if it was an abort
-                if (e.name === 'AbortError' || this.stopped) {
+                // Don't treat AbortError as a failure to surface
+                if (e && e.name === 'AbortError') {
                     debug(`Summarization aborted for message ${index}`);
+                } else if (this.stopped) {
+                    debug(`Summarization stopped by user for message ${index}`);
                 } else {
-                    // Log to console only - no toastr popup
-                    // This avoids false-positive error popups when summarization actually succeeds
-                    // (some models return empty but the summary is still saved)
+                    // Surface unexpected errors to the user and record on the message
                     console.error(`[${MODULE_NAME_FANCY}]`, `Failed to summarize message ${index}:`, e);
                     set_data(message, 'error', String(e));
+                    try {
+                        toastr.error(`Summarization failed for message ${index}: ${e.message || String(e)}`, MODULE_NAME_FANCY);
+                    } catch (toastErr) {
+                        // If toastr fails for some reason, at least log it
+                        console.error(`[${MODULE_NAME_FANCY}] toastr error:`, toastErr);
+                    }
                 }
+
                 this.abortController = null;
             }
             
@@ -3160,10 +3215,23 @@ function register_event_listeners() {
 
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(async () => {
-            // Refresh vector statistics after each message
+            // Refresh Qdrant memories and vector statistics after each message
             if (get_settings('qdrant_enabled')) {
-                await refresh_vector_statistics();
+                try {
+                    await refresh_qdrant_memories();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh Qdrant memories (CHARACTER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh Qdrant memories: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+
+                try {
+                    await refresh_vector_statistics();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh vector statistics (CHARACTER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
             }
+
             update_status_display();
         }, 100);
     });
@@ -3187,10 +3255,23 @@ function register_event_listeners() {
 
         // Delay status update to ensure itemizedPrompts is populated
         setTimeout(async () => {
-            // Refresh vector statistics after each message
+            // Refresh Qdrant memories and vector statistics after each message
             if (get_settings('qdrant_enabled')) {
-                await refresh_vector_statistics();
+                try {
+                    await refresh_qdrant_memories();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh Qdrant memories (USER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh Qdrant memories: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+ 
+                try {
+                    await refresh_vector_statistics();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh vector statistics (USER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
             }
+ 
             update_status_display();
         }, 100);
     });
@@ -3405,26 +3486,44 @@ function initialize_ui_listeners() {
     
     // Overview summarize button (toggles between start and stop)
     $('#ct_ov_summarize').on('click', async () => {
+        debug_trunc('Overview Summarize button clicked');
+
         // If already active, stop
         if (summaryQueue.active) {
+            debug_trunc('SummaryQueue active - stopping');
             summaryQueue.stop();
             return;
         }
-        
+
         const ctx = getContext();
-        const chat = ctx.chat;
+        const chat = ctx.chat || [];
+
+        if (!chat || chat.length === 0) {
+            debug_trunc('No chat messages available to summarize');
+            toastr.info('No messages to summarize', MODULE_NAME_FANCY);
+            return;
+        }
+
         const indexes = [];
-        
+
         for (let i = 0; i < chat.length; i++) {
             if (!chat[i].is_system && !get_memory(chat[i])) {
                 indexes.push(i);
             }
         }
-        
-        if (indexes.length > 0) {
-            await summaryQueue.summarize(indexes);
-        } else {
+
+        debug_trunc(`Found ${indexes.length} messages to summarize`);
+
+        if (indexes.length === 0) {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
+            return;
+        }
+
+        try {
+            await summaryQueue.summarize(indexes);
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] Summarize all failed:`, e);
+            toastr.error(`Summarization failed: ${e.message || String(e)}`, MODULE_NAME_FANCY);
         }
     });
     
@@ -5619,6 +5718,32 @@ jQuery(async function () {
     // Setup UI and events
     initialize_ui_listeners();
     register_event_listeners();
+
+    // Ensure truncation index and calibration state are loaded on initial startup
+    // so the Overview and Calibration UIs reflect persisted chat metadata immediately
+    try {
+        load_truncation_index();
+        snapshot_chat_state();
+
+        // Refresh memory prompts and UI to reflect loaded state
+        refresh_memory();
+        update_calibration_ui();
+        update_summary_stats_display();
+        update_overview_tab();
+
+        // Refresh vector statistics asynchronously if Qdrant is enabled
+        if (get_settings('qdrant_enabled')) {
+            try {
+                await refresh_vector_statistics();
+            } catch (e) {
+                debug_qdrant('Initial refresh_vector_statistics failed:', e);
+                try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+            }
+        }
+    } catch (e) {
+        console.error(`[${MODULE_NAME_FANCY}] Initialization post-load failed:`, e);
+        try { toastr.error(`Initialization failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) {}
+    }
     
     log('Context Truncator loaded successfully');
 });
