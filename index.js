@@ -2877,27 +2877,80 @@ class SummaryQueue {
                 .replace(/\{\{char\}\}/g, ctx.name2 || 'Character')
                 .replace(/\{\{context_block\}\}/g, contextBlock);
             
-            // Generate summary using generateRaw
+            // Generate summary using configured summary endpoint (if set) or generateRaw
             try {
                 // Create new AbortController for this generation
                 this.abortController = new AbortController();
                 
-                // generateRaw is imported from script.js at module level
                 debug(`Generating summary for message ${index}`);
+                debug_trunc(`[${MODULE_NAME_FANCY}] Using ${get_settings('summary_endpoint_url') ? 'summary endpoint' : 'generateRaw'} for message ${index}`);
                 
-                // Use generateRaw WITHOUT prefill - matches MessageSummarize's default behavior
-                // The prompt template already instructs the model to start with a speaker label
-                // Using prefill can cause immediate EOS token emission with some models
+                // Prefer external summary endpoint when configured (REQ-003)
                 let result = null;
                 try {
-                    result = await generateRaw({
-                        prompt: prompt,
-                        // Note: generateRaw doesn't support abortSignal directly,
-                        // but we check this.stopped before and after the call
-                    });
+                    if (get_settings('summary_endpoint_url')) {
+                        // Defensive: retry once on timeout or empty response
+                        let attempts = 0;
+                        while (attempts < 2) {
+                            try {
+                                result = await call_summary_endpoint(prompt);
+                                // If endpoint returned an empty string, retry once
+                                if (typeof result === 'string' && result.toString().trim().length === 0) {
+                                    if (attempts === 0) {
+                                        debug_trunc(`Summary endpoint returned empty for message ${index}, retrying once`);
+                                        attempts++;
+                                        continue;
+                                    } else {
+                                        debug_trunc(`[${MODULE_NAME_FANCY}] Summarization empty response for message ${index}`);
+                                        set_data(message, 'error', 'Empty response from summary endpoint');
+                                        try { toastr.error(`Summarization returned empty for message ${index}`, MODULE_NAME_FANCY); } catch (t) {}
+                                        this.abortController = null;
+                                        return;
+                                    }
+                                }
+                                // Non-empty result -> break retry loop
+                                break;
+                            } catch (callErr) {
+                                // If timed out, retry once
+                                if (callErr && callErr.message && callErr.message.includes('Connection timed out')) {
+                                    if (attempts === 0) {
+                                        debug_trunc(`Summary endpoint timed out for message ${index}, retrying once`);
+                                        attempts++;
+                                        continue; // retry
+                                    } else {
+                                        debug_trunc(`[${MODULE_NAME_FANCY}] Summarization timed out for message ${index}: ${callErr}`);
+                                        set_data(message, 'error', 'Connection timed out (10s)');
+                                        try { toastr.error(`Summarization timed out for message ${index}`, MODULE_NAME_FANCY); } catch (t) {}
+                                        this.abortController = null;
+                                        return;
+                                    }
+                                }
+                                // Network/CORS errors are surfaced as TypeError -> map to friendly message
+                                if (callErr && callErr.message && callErr.message.startsWith('Network/CORS error')) {
+                                    debug_trunc(`[${MODULE_NAME_FANCY}] Summarization network/CORS error for message ${index}: ${callErr.message}`);
+                                    set_data(message, 'error', String(callErr.message));
+                                    try { toastr.error(`Summarization network/CORS error for message ${index}: ${callErr.message}`, MODULE_NAME_FANCY); } catch (t) {}
+                                    this.abortController = null;
+                                    return;
+                                }
+                                // Other errors - record and surface
+                                debug_trunc(`[${MODULE_NAME_FANCY}] Summarization call failed for message ${index}: ${callErr}`);
+                                set_data(message, 'error', String(callErr));
+                                try { toastr.error(`Summarization generation failed for message ${index}: ${callErr.message || String(callErr)}`, MODULE_NAME_FANCY); } catch (t) {}
+                                this.abortController = null;
+                                return;
+                            }
+                        }
+                    } else {
+                        result = await generateRaw({
+                            prompt: prompt,
+                            // Note: generateRaw doesn't support abortSignal directly,
+                            // but we check this.stopped before and after the call
+                        });
+                    }
                 } catch (e) {
-                    // Surface unexpected generation errors to the user and record on the message
-                    console.error(`[${MODULE_NAME_FANCY}]`, `generateRaw failed for message ${index}:`, e);
+                    // Surface unexpected generation/errors to the user and record on the message
+                    console.error(`[${MODULE_NAME_FANCY}]`, `Summarization generation failed for message ${index}:`, e);
                     set_data(message, 'error', String(e));
                     try {
                         toastr.error(`Summarization generation failed for message ${index}: ${e.message || String(e)}`, MODULE_NAME_FANCY);
@@ -2915,7 +2968,7 @@ class SummaryQueue {
                     return;
                 }
                 
-                // Check if stopped during generation
+                // Duplicate stop-check retained for safety
                 if (this.stopped) {
                     debug(`Summarization stopped during generation of message ${index}`);
                     this.abortController = null;
@@ -2925,9 +2978,9 @@ class SummaryQueue {
                 this.abortController = null;
                 
                 if (result) {
-                    // The model should return a summary starting with the speaker label
-                    // as instructed in the prompt template
-                    let rawSummary = result;
+                    // Normalize result to a string (handles both fetch text and structured objects)
+                    const raw = (typeof result === 'string') ? result : (result?.toString?.() || '');
+                    let rawSummary = raw;
                     
                     // Clean the output - remove any thinking content that might have snuck through
                     let summary = this.clean_summary_output(rawSummary);
@@ -3706,6 +3759,7 @@ async function test_summary_endpoint() {
     $status.removeClass().addClass('ct_status_message ct_status_info').text('Testing connection...');
     $button.prop('disabled', true);
 
+    // We'll reuse the same parsing logic used by call_summary_endpoint to ensure parity
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
 
@@ -3733,7 +3787,7 @@ async function test_summary_endpoint() {
             let dataText = '';
             try {
                 const data = await resp.json();
-                dataText = (data?.choices && data.choices[0]) ? (data.choices[0].message?.content || data.choices[0].text) : (data?.text || '');
+                dataText = extract_model_content(data);
             } catch (e) {
                 // Not JSON or unexpected shape
                 const text = await resp.text();
@@ -3768,6 +3822,11 @@ async function test_summary_endpoint() {
 
 
 // Call summary endpoint (OpenAI-compatible). Returns the raw model output as string.
+function extract_model_content(data) {
+    if (!data) return '';
+    return (data?.choices && data.choices[0]) ? (data.choices[0].message?.content || data.choices[0].text) : (data?.text || '');
+}
+
 async function call_summary_endpoint(prompt) {
     const url = get_settings('summary_endpoint_url');
     const apiKey = get_settings('summary_endpoint_api_key');
@@ -3808,7 +3867,7 @@ async function call_summary_endpoint(prompt) {
         let data;
         try { data = await resp.json(); } catch (e) { const txt = await resp.text(); return txt; }
 
-        const content = (data?.choices && data.choices[0]) ? (data.choices[0].message?.content || data.choices[0].text) : (data?.text || '');
+        const content = extract_model_content(data);
         return content ?? '';
     } catch (e) {
         clearTimeout(timeout);
