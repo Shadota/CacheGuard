@@ -47,6 +47,10 @@ const default_settings = {
     target_utilization: 0.80,       // Target 80% of max context
     calibration_tolerance: 0.05,    // 5% tolerance before recalibrating
     
+    // Summary injection limits (V22)
+    auto_limit_summaries: true,     // Auto-calculate max summary tokens (20% of target budget)
+    max_summary_injection_tokens: 10000,  // Manual override when auto_limit_summaries is false (0 = unlimited)
+    
     // Summarization settings
     auto_summarize: true,
     connection_profile: "",         // DEPRECATED: Connection profile dropdown removed — summarization uses independent summary_endpoint_url
@@ -179,6 +183,9 @@ const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE stat
 // Qdrant token averaging for variance handling
 let QDRANT_TOKEN_HISTORY = [];  // Rolling history of Qdrant injection tokens
 const QDRANT_HISTORY_SIZE = 5;  // Number of samples to average
+
+// Summary injection tracking (V22)
+let DROPPED_SUMMARY_COUNT = 0;  // Summaries dropped due to token cap
 
 // Vector Statistics State (V11)
 let VECTOR_STATS = {
@@ -1096,20 +1103,53 @@ function concatenate_summaries(indexes) {
     return summary;
 }
 
-// Collect messages that need summaries injected
+// Calculate effective max summary injection tokens (auto or manual) - V22
+function get_max_summary_injection_tokens() {
+    if (get_settings('auto_limit_summaries')) {
+        // Auto-calculate: 20% of target budget
+        const maxContext = getMaxContextSize();
+        const targetUtilization = get_settings('target_utilization') || 0.80;
+        return Math.floor(maxContext * targetUtilization * 0.20);
+    }
+    // Manual: use setting directly (0 = unlimited)
+    return get_settings('max_summary_injection_tokens') || 0;
+}
+
+// Collect messages that need summaries injected (V22: respects token cap)
 function collect_summary_indexes() {
     const ctx = getContext();
     const chat = ctx.chat;
-    const indexes = [];
+    const maxTokens = get_max_summary_injection_tokens();
+    const separator = get_settings('summary_injection_separator');
+    const sepSize = calculate_injection_separator_size(separator);
     
-    for (let i = 0; i < chat.length; i++) {
+    const indexes = [];
+    let totalTokens = 0;
+    let droppedCount = 0;
+    
+    // Iterate from NEWEST to OLDEST (most recent summaries have priority)
+    for (let i = chat.length - 1; i >= 0; i--) {
         const lagging = get_data(chat[i], 'lagging');
         const memory = get_memory(chat[i]);
         
         if (lagging && memory) {
-            indexes.push(i);
+            const memoryTokens = count_tokens(memory) + sepSize;
+            
+            // Check if adding this summary would exceed cap
+            if (maxTokens > 0 && totalTokens + memoryTokens > maxTokens) {
+                droppedCount++;
+                continue;  // Skip this summary (dropped)
+            }
+            
+            indexes.unshift(i);  // Add to front to maintain chronological order
+            totalTokens += memoryTokens;
         }
     }
+    
+    // Store dropped count for dashboard display
+    DROPPED_SUMMARY_COUNT = droppedCount;
+    
+    debug_trunc(`Summary injection: ${indexes.length} included, ${droppedCount} dropped (${totalTokens}/${maxTokens} tokens)`);
     
     return indexes;
 }
@@ -1285,8 +1325,8 @@ function update_status_display() {
         // Fix 2.1: Adaptive EMA alpha based on error magnitude
         // Smaller errors = smaller alpha (more stable), larger errors = larger alpha (faster correction)
         const errorMagnitude = Math.abs(newCorrectionFactor - oldCorrectionFactor);
-        const baseAlpha = 0.25;  // Increased from 0.15 for faster convergence
-        const maxAlpha = 0.4;    // Maximum alpha for large errors
+        const baseAlpha = 0.35;  // Increased from 0.25 for faster convergence (V22)
+        const maxAlpha = 0.6;    // Increased from 0.4 - Maximum alpha for large errors (V22)
         const adaptiveAlpha = Math.min(baseAlpha + (errorMagnitude * 0.5), maxAlpha);
         
         // Smooth the correction factor using adaptive EMA
@@ -2115,6 +2155,14 @@ function update_summary_stats_display() {
     $('#ct_ov_summarized_count').text(summarizedCount);
     $('#ct_ov_pending_count').text(pendingCount);
     
+    // V22: Update dropped count (messages with summaries that exceeded token cap)
+    $('#ct_ov_dropped_count').text(DROPPED_SUMMARY_COUNT);
+    if (DROPPED_SUMMARY_COUNT > 0) {
+        $('#ct_ov_dropped_count').addClass('ct_text_red');
+    } else {
+        $('#ct_ov_dropped_count').removeClass('ct_text_red');
+    }
+    
     // Update coverage indicator with percentage and appropriate class
     const $coverageIndicator = $('#ct_ov_summary_coverage');
     $coverageIndicator.removeClass('ct_coverage_good ct_coverage_partial ct_coverage_low ct_coverage_none');
@@ -2221,6 +2269,21 @@ function update_target_size_state() {
         $targetSize.removeClass('ct_disabled');
         $targetSize.attr('title', '');
     }
+}
+
+// Update auto-limit summaries display value (V22)
+function update_auto_limit_display() {
+    const $display = $('#ct_auto_limit_value');
+    
+    if (!get_settings('auto_limit_summaries')) {
+        $display.text('(manual)');
+        return;
+    }
+    
+    const maxContext = getMaxContextSize();
+    const targetUtilization = get_settings('target_utilization') || 0.80;
+    const autoLimit = Math.floor(maxContext * targetUtilization * 0.20);
+    $display.text(`~${autoLimit.toLocaleString()} tokens`);
 }
 
 // ==================== POPOUT FUNCTIONS ====================
@@ -2800,7 +2863,16 @@ class SummaryQueue {
         this.updateButtonState('inactive');
     }
     
-    // Clean summary output - extract only the actual summary, strip thinking content
+    /**
+     * Cleans summary output by removing GLM-4.5 thinking blocks and extracting actual summary.
+     * GLM-4.5 models wrap reasoning in <think>...</think> tags. This function:
+     * 1. Detects and extracts content AFTER the last </think> tag (the actual summary)
+     * 2. Removes any remaining <think> blocks that appear mid-response
+     * 3. Strips orphaned tags from truncated responses
+     *
+     * @param {string} text - Raw model output that may contain <think> blocks
+     * @returns {string} Cleaned summary text with all thinking content removed
+     */
     clean_summary_output(text) {
         try {
             if (!text) return '';
@@ -2811,7 +2883,8 @@ class SummaryQueue {
             // Reasoning models output thinking, then the actual summary content
             const thinkStartIdx = cleaned.toLowerCase().indexOf('<think>');
             if (thinkStartIdx !== -1) {
-                const closeIdx = cleaned.toLowerCase().indexOf('</think>', thinkStartIdx);
+                // Use lastIndexOf to find the LAST </think> tag (handles multiple <think> blocks)
+                const closeIdx = cleaned.toLowerCase().lastIndexOf('</think>');
                 if (closeIdx !== -1) {
                     // Extract content AFTER the think block (this is the actual summary)
                     const afterThink = cleaned.substring(closeIdx + 8).trim();
@@ -3372,6 +3445,29 @@ function initialize_ui_listeners() {
     // ==================== TRUNCATION SETTINGS ====================
     bind_setting('#ct_enabled', 'enabled', 'boolean');
     bind_setting('#ct_target_size', 'target_context_size', 'number');
+    
+    // Auto-limit summaries toggle (V22)
+    bind_setting('#ct_auto_limit_summaries', 'auto_limit_summaries', 'boolean');
+    
+    // Show/hide manual slider based on auto toggle
+    $('#ct_auto_limit_summaries').on('change', function() {
+        const autoEnabled = $(this).prop('checked');
+        $('#ct_manual_summary_limit').toggle(!autoEnabled);
+        update_auto_limit_display();
+    });
+    
+    // Manual slider (only used when auto is disabled)
+    bind_range_setting('#ct_max_summary_injection_tokens', 'max_summary_injection_tokens', '#ct_max_summary_injection_tokens_display');
+    
+    // Initialize visibility
+    $('#ct_manual_summary_limit').toggle(!get_settings('auto_limit_summaries'));
+    
+    // Update calculated value display
+    update_auto_limit_display();
+    
+    // Also update when target_utilization changes
+    $('#ct_target_utilization').on('change', update_auto_limit_display);
+    
     bind_setting('#ct_auto_summarize', 'auto_summarize', 'boolean');
     bind_setting('#ct_summary_endpoint_url', 'summary_endpoint_url', 'text');
     bind_setting('#ct_summary_endpoint_api_key', 'summary_endpoint_api_key', 'text');
@@ -4000,8 +4096,10 @@ async function call_summary_endpoint(prompt, options = {}) {
             { role: 'user', content: prompt }
         ],
         max_tokens: maxTokensOverride || get_settings('summary_max_tokens') || 500,
-        temperature: 0.2,
-        enable_thinking: false
+        temperature: 0.2
+        // NOTE: enable_thinking is NOT a valid OpenAI API parameter
+        // It only exists in Zhipu's GLM cloud API (https://open.bigmodel.cn/dev/api/normal-model/glm-4)
+        // Thinking content from GLM-4.5 is handled by clean_summary_output() which strips <think> blocks
     });
 
     try {

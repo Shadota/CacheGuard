@@ -182,6 +182,16 @@
                                 </span>
                                 <span id="ct_ov_pending_count" class="ct_stat_value">--</span>
                             </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">
+                                    Dropped
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Summaries excluded due to token cap (newest prioritized)</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_dropped_count" class="ct_stat_value ct_text_red">0</span>
+                            </div>
                         </div>
                     </div>
 
@@ -438,6 +448,30 @@
                         <span class="ct_setting_value"><span id="ct_target_size_display">--</span> tokens</span>
                     </div>
                     <input id="ct_target_size" class="text_pole" type="number" min="1000" max="200000" step="1000" />
+                </div>
+
+                <div class="ct_compact_checkbox">
+                    <input id="ct_auto_limit_summaries" type="checkbox" checked />
+                    <label for="ct_auto_limit_summaries">Auto-Limit Summaries</label>
+                    <span class="ct_tooltip ct_tooltip_right">
+                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                        <span class="ct_tooltip_text">Automatically limits summary injection to 20% of target budget. Oldest summaries dropped when limit reached.</span>
+                    </span>
+                    <span id="ct_auto_limit_value" class="ct_setting_value" style="margin-left: 8px;">~9,600 tokens</span>
+                </div>
+
+                <div id="ct_manual_summary_limit" class="ct_compact_setting" style="display: none;">
+                    <div class="ct_setting_header">
+                        <span class="ct_setting_label">
+                            Max Summary Tokens
+                            <span class="ct_tooltip">
+                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                <span class="ct_tooltip_text">Manual token limit for summary injection (0 = unlimited)</span>
+                            </span>
+                        </span>
+                        <span id="ct_max_summary_injection_tokens_display" class="ct_setting_value">10000</span>
+                    </div>
+                    <input id="ct_max_summary_injection_tokens" class="ct_compact_slider" type="range" min="0" max="20000" step="500" value="10000" />
                 </div>
 
                 <div class="ct_compact_checkbox">
