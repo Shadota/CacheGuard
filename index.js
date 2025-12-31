@@ -1477,6 +1477,7 @@ function calibrate_target_size(actualSize) {
     }
     
     debug_trunc(`═══════════════════════════════════════════════════════════════`);
+    save_truncation_index();
     update_calibration_ui();
 }
 
@@ -2602,6 +2603,7 @@ class SummaryQueue {
         this.active = false;
         this.stopped = false;
         this.abortController = null;  // For hard-stopping current generation
+        this._currentlyGenerating = false;  // Lock to prevent parallel requests
     }
     
     async summarize(indexes) {
@@ -2628,6 +2630,10 @@ class SummaryQueue {
     stop() {
         if (!this.active) return;
         
+        // Update UI immediately FIRST (before any async operations)
+        this.updateButtonState('stopping');
+
+        // Set all stop flags
         // Mark as stopped immediately to prevent new work from starting
         this.stopped = true;
 
@@ -2643,9 +2649,6 @@ class SummaryQueue {
             this.abortController = null;
             debug('Aborted current summarization generation');
         }
-        
-        // Show "Stopping..." state while cleanup completes (synchronous update)
-        this.updateButtonState('stopping');
         
         debug('Summarization queue stopped by user');
     }
@@ -2740,14 +2743,31 @@ class SummaryQueue {
 
             let cleaned = text.trim();
 
-            // Remove complete <think>...</think> blocks first (including content)
+            // CRITICAL FIX: Handle responses that START with <think>
+            // Reasoning models output thinking FIRST, then the actual content
+            if (cleaned.toLowerCase().startsWith('<think>')) {
+                const closeIdx = cleaned.toLowerCase().indexOf('</think>');
+                if (closeIdx !== -1) {
+                    // Extract only content AFTER the thinking block
+                    cleaned = cleaned.substring(closeIdx + 8).trim();
+                } else {
+                    // No closing tag = response is incomplete thinking = invalid
+                    debug(`Summary contains unclosed <think> block, returning empty`);
+                    return '';
+                }
+            }
+
+            // Remove any COMPLETE <think>...</think> blocks that appear mid-response
             cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-            // Remove orphaned think tags and everything after them
-            const orphanedThinkMatch = cleaned.match(/<\/?think>/i);
-            if (orphanedThinkMatch) {
-                cleaned = cleaned.substring(0, orphanedThinkMatch.index).trim();
+            // Remove orphaned think tags (incomplete blocks from truncation)
+            // First, if there's an opening <think> without closing, truncate there
+            const openThink = cleaned.indexOf('<think>');
+            if (openThink !== -1) {
+                cleaned = cleaned.substring(0, openThink).trim();
             }
+            // Then remove any stray </think> tags
+            cleaned = cleaned.replace(/<\/think>/gi, '').trim();
 
             // Strip common markup tokens that may appear in model outputs
             cleaned = cleaned.replace(/<\/?s>/gi, '');         // Remove <s> and </s>
@@ -2929,8 +2949,28 @@ class SummaryQueue {
             
             // Generate summary using configured summary endpoint (if set) or generateRaw
             try {
+                // Wait for any previous generation to complete
+                while (this._currentlyGenerating && !this.stopped) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                if (this.stopped) {
+                    debug(`Summarization stopped while waiting for previous generation for message ${index}`);
+                    return;
+                }
+
+                this._currentlyGenerating = true;
+
                 // Create new AbortController for this generation
                 this.abortController = new AbortController();
+
+                // Check stopped BEFORE making the API call
+                if (this.stopped) {
+                    debug(`Summarization stopped before API call for message ${index}`);
+                    this.abortController = null;
+                    this._currentlyGenerating = false;
+                    return;
+                }
 
                 debug(`Generating summary for message ${index}`);
                 debug_trunc(`[${MODULE_NAME_FANCY}] Using ${get_settings('summary_endpoint_url') ? 'summary endpoint' : 'generateRaw'} for message ${index}`);
@@ -2970,6 +3010,7 @@ class SummaryQueue {
                 if (this.stopped) {
                     debug(`Summarization stopped during generation of message ${index}`);
                     this.abortController = null;
+                    this._currentlyGenerating = false;
                     return;
                 }
 
@@ -3010,6 +3051,9 @@ class SummaryQueue {
 
                     debug(`Summarized message ${index}: "${summary}"`);
                 }
+                
+                // Release lock after successful completion
+                this._currentlyGenerating = false;
             } catch (e) {
                 // Any unexpected errors here should be surfaced and recorded
                 const aborted = this.stopped || (this.abortController && this.abortController.signal && this.abortController.signal.aborted) || (e && (e.name === 'AbortError' || (e.message && e.message.toLowerCase().includes('abort'))));
@@ -3022,6 +3066,7 @@ class SummaryQueue {
                 }
 
                 this.abortController = null;
+                this._currentlyGenerating = false;  // Release lock on error
             }
             
             // Refresh memory after summarization (unless stopped)
@@ -3825,7 +3870,6 @@ async function call_summary_endpoint(prompt, options = {}) {
     const { signal = null, attempt = 0 } = options;
     const url = get_settings('summary_endpoint_url');
     const apiKey = get_settings('summary_endpoint_api_key');
-    const timeout = get_settings('summary_endpoint_timeout') || 15000;
     const maxRetries = get_settings('summary_max_retries') || 3;
 
     if (!url) throw new Error('No summary endpoint configured');
@@ -3834,9 +3878,10 @@ async function call_summary_endpoint(prompt, options = {}) {
     try { parsed = new URL(url); } catch (e) { throw new Error('Invalid summary endpoint URL'); }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    // NO TIMEOUT - wait indefinitely for LLM response
+    // AbortController is ONLY used for user-initiated Stop button
     
-    // Link external signal to our controller
+    // Link external abort signal (from Stop button) to our controller
     if (signal) {
         signal.addEventListener('abort', () => controller.abort());
     }
@@ -3858,8 +3903,6 @@ async function call_summary_endpoint(prompt, options = {}) {
             body,
             signal: controller.signal
         });
-
-        clearTimeout(timeoutId);
 
         // Handle retryable errors
         if (resp.status === 503 || resp.status === 429) {
@@ -3908,11 +3951,8 @@ async function call_summary_endpoint(prompt, options = {}) {
         return content;
         
     } catch (e) {
-        clearTimeout(timeoutId);
-        
         if (e.name === 'AbortError') {
-            if (signal?.aborted) throw new Error('Request aborted by user');
-            throw new Error(`Connection timed out (${timeout/1000}s)`);
+            throw new Error('Request aborted by user');
         }
         if (e instanceof TypeError) throw new Error(`Network/CORS error: ${e.message}`);
         throw e;
@@ -3972,34 +4012,58 @@ async function generate_embedding(text) {
         headers['Authorization'] = `Bearer ${apiKey}`;
     }
     
-    // OpenAI-compatible embedding request format
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify({
-            input: text,
-            model: 'text-embedding'  // KoboldCPP ignores this but it's required for format
-        })
-    });
+    const MAX_RETRIES = 3;
+    const BASE_DELAY = 1000; // 1 second
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            // OpenAI-compatible embedding request format
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    input: text,
+                    model: 'text-embedding'  // KoboldCPP ignores this but it's required for format
+                })
+            });
+            
+            if (!response.ok) {
+                // Check if it's a retryable error (503 Service Unavailable)
+                if (response.status === 503 && attempt < MAX_RETRIES) {
+                    const delay = BASE_DELAY * Math.pow(2, attempt);
+                    debug_qdrant(`Embedding endpoint 503 error, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+                
+                const errorText = await response.text();
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const data = await response.json();
+            
+            // OpenAI format: data.data[0].embedding
+            if (data.data && data.data[0] && data.data[0].embedding) {
+                return data.data[0].embedding;
+            }
+            
+            // Alternative format: data.embedding
+            if (data.embedding) {
+                return data.embedding;
+            }
+            
+            throw new Error('Unexpected embedding response format');
+        } catch (err) {
+            // Network errors or other exceptions
+            if (attempt < MAX_RETRIES && (err.message.includes('fetch') || err.message.includes('network'))) {
+                const delay = BASE_DELAY * Math.pow(2, attempt);
+                debug_qdrant(`Embedding generation error: ${err.message}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            throw err; // Final attempt failed or non-retryable error
+        }
     }
-    
-    const data = await response.json();
-    
-    // OpenAI format: data.data[0].embedding
-    if (data.data && data.data[0] && data.data[0].embedding) {
-        return data.data[0].embedding;
-    }
-    
-    // Alternative format: data.embedding
-    if (data.embedding) {
-        return data.embedding;
-    }
-    
-    throw new Error('Unexpected embedding response format');
 }
 
 // Get the current collection name (may include chat-specific suffix)
@@ -4608,20 +4672,45 @@ async function upsert_points(points) {
         throw new Error('Qdrant not configured');
     }
     
-    const response = await fetch(`${url}/collections/${collection}/points`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            points: points
-        })
-    });
+    const MAX_RETRIES = 3;
+    const BASE_DELAY = 1000; // 1 second
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to upsert points: ${errorText}`);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetch(`${url}/collections/${collection}/points`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    points: points
+                })
+            });
+            
+            if (!response.ok) {
+                // Check if it's a retryable error (503 Service Unavailable)
+                if (response.status === 503 && attempt < MAX_RETRIES) {
+                    const delay = BASE_DELAY * Math.pow(2, attempt);
+                    debug_qdrant(`Qdrant 503 error on upsert, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+                
+                const errorText = await response.text();
+                throw new Error(`Failed to upsert points: ${errorText}`);
+            }
+            
+            debug_qdrant(`Upserted ${points.length} points to ${collection}`);
+            return; // Success
+        } catch (err) {
+            // Network errors or other exceptions
+            if (attempt < MAX_RETRIES) {
+                const delay = BASE_DELAY * Math.pow(2, attempt);
+                debug_qdrant(`Qdrant upsert error: ${err.message}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            throw err; // Final attempt failed
+        }
     }
-    
-    debug_qdrant(`Upserted ${points.length} points to ${collection}`);
 }
 
 // Simple temporal filtering (like st-qdrant-memory)
