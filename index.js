@@ -1001,40 +1001,100 @@ function calculate_truncation_index() {
         }
     }
     
-    // V26: If we're under target AND have truncation, try to REDUCE it
+    // V26/V27: If we're under target AND have truncation, try to REDUCE it
     // This recovers context space when summaries are smaller than originals
     let finalIndex = Math.max(nextIndex, currentIndex);
     
     // Check if we have room to include more messages
     const currentTotal = estimateChatSize(finalIndex) + nonChatBudget;
-    if (currentTotal < targetSize && finalIndex > 0) {
+    const underTarget = currentTotal < targetSize;
+    const hasHeadroom = targetSize - currentTotal;
+    
+    debug_trunc(`  `);
+    debug_trunc(`  === V27 TRUNCATION REDUCTION CHECK ===`);
+    debug_trunc(`  Current truncation index: ${finalIndex}`);
+    debug_trunc(`  Estimated chat size: ${estimateChatSize(finalIndex)} tokens`);
+    debug_trunc(`  Non-chat budget: ${nonChatBudget} tokens`);
+    debug_trunc(`  Current total: ${currentTotal} tokens`);
+    debug_trunc(`  Target size: ${targetSize} tokens`);
+    debug_trunc(`  Under target: ${underTarget} (headroom: ${hasHeadroom} tokens)`);
+    
+    if (underTarget && finalIndex > 0) {
         debug_trunc(`  `);
-        debug_trunc(`  === REDUCING TRUNCATION (V26) ===`);
-        debug_trunc(`  Current index: ${finalIndex}, current total: ${currentTotal}`);
-        debug_trunc(`  Headroom: ${targetSize - currentTotal} tokens`);
+        debug_trunc(`  === ATTEMPTING REDUCTION ===`);
         
         // Greedily include more messages while under target
         let reducedIndex = finalIndex;
-        while (reducedIndex > 0) {
-            // Calculate size if we include one more message
-            const candidateSize = estimateChatSize(reducedIndex - 1);
+        let iterations = 0;
+        const MAX_ITERATIONS = 50;  // Safety limit
+        
+        while (reducedIndex > 0 && iterations < MAX_ITERATIONS) {
+            iterations++;
+            
+            // Get info about the message we're considering including
+            const candidateIdx = reducedIndex - 1;
+            const msg = chat[candidateIdx];
+            
+            if (!msg || msg.is_system) {
+                debug_trunc(`    Skipping message ${candidateIdx} (system or missing)`);
+                reducedIndex--;
+                continue;
+            }
+            
+            // Calculate size if we include this message
+            const candidateSize = estimateChatSize(candidateIdx);
             const candidateTotal = candidateSize + nonChatBudget;
+            
+            // Get individual message stats for debugging
+            const msgTokensRaw = estimateMessagePromptTokens(msg, candidateIdx);
+            const msgTokensCorrected = Math.floor(msgTokensRaw * CHAT_TOKEN_CORRECTION_FACTOR);
+            const summaryText = get_memory(msg);
+            const summaryTokens = summaryText ? count_tokens(summaryText) + sepSize : 0;
+            const tokenDifference = msgTokensCorrected - summaryTokens;
+            
+            debug_trunc(`    Message ${candidateIdx}:`);
+            debug_trunc(`      Full tokens: ${msgTokensCorrected} (raw: ${msgTokensRaw}, factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)})`);
+            debug_trunc(`      Summary tokens: ${summaryTokens}`);
+            debug_trunc(`      Net cost to include: +${tokenDifference} tokens`);
+            debug_trunc(`      Candidate total if included: ${candidateTotal} tokens`);
+            debug_trunc(`      Would exceed target: ${candidateTotal > targetSize}`);
             
             if (candidateTotal <= targetSize) {
                 reducedIndex--;
-                debug_trunc(`    Including message ${reducedIndex}, new total: ${candidateTotal}`);
+                debug_trunc(`      → INCLUDING message ${candidateIdx}`);
             } else {
-                debug_trunc(`    Cannot include message ${reducedIndex - 1}, would exceed: ${candidateTotal}`);
+                debug_trunc(`      → STOPPING: would exceed target by ${candidateTotal - targetSize} tokens`);
                 break;
             }
         }
         
+        if (iterations >= MAX_ITERATIONS) {
+            debug_trunc(`  WARNING: Hit max iterations (${MAX_ITERATIONS})`);
+        }
+        
         if (reducedIndex < finalIndex) {
-            const tokensRecovered = estimateChatSize(reducedIndex) - estimateChatSize(finalIndex);
-            debug_trunc(`  Reduced truncation: ${finalIndex} → ${reducedIndex} (recovered ~${Math.abs(tokensRecovered)} tokens)`);
+            const before = estimateChatSize(finalIndex);
+            const after = estimateChatSize(reducedIndex);
+            const tokensRecovered = after - before;  // Note: this is POSITIVE because we're including more
+            debug_trunc(`  `);
+            debug_trunc(`  === REDUCTION RESULT ===`);
+            debug_trunc(`  Index changed: ${finalIndex} → ${reducedIndex}`);
+            debug_trunc(`  Messages now included: ${finalIndex - reducedIndex} more`);
+            debug_trunc(`  Token change: ${tokensRecovered} tokens (expected positive)`);
             finalIndex = reducedIndex;
         } else {
-            debug_trunc(`  Could not reduce truncation further`);
+            debug_trunc(`  `);
+            debug_trunc(`  === NO REDUCTION POSSIBLE ===`);
+            debug_trunc(`  Could not include any additional messages`);
+        }
+    } else {
+        debug_trunc(`  `);
+        debug_trunc(`  === REDUCTION SKIPPED ===`);
+        if (!underTarget) {
+            debug_trunc(`  Reason: Already at/over target (${currentTotal} >= ${targetSize})`);
+        }
+        if (finalIndex <= 0) {
+            debug_trunc(`  Reason: No truncation active (finalIndex = ${finalIndex})`);
         }
     }
     
