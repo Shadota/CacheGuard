@@ -620,6 +620,41 @@
     white-space: nowrap;
 }
 
+/* Deprecated / compatibility classes for older theme variants */
+.ct_coverage_good,
+.ct_coverage_partial,
+.ct_coverage_low,
+.ct_coverage_none {
+   display: inline-block;
+   min-width: 36px;
+   text-align: center;
+}
+
+/* Accessibility: ensure sufficient contrast for indicator backgrounds */
+.ct_coverage_good {
+   color: #0b6623; /* darker green for contrast */
+   background: rgba(76, 175, 80, 0.18);
+   border: 1px solid rgba(76,175,80,0.28);
+}
+
+.ct_coverage_partial {
+   color: #6b5200; /* darker yellow/brown for contrast */
+   background: rgba(255, 193, 7, 0.14);
+   border: 1px solid rgba(255,193,7,0.22);
+}
+
+.ct_coverage_low {
+   color: #7a4200; /* darker orange for contrast */
+   background: rgba(255, 152, 0, 0.12);
+   border: 1px solid rgba(255,152,0,0.2);
+}
+
+.ct_coverage_none {
+   color: #5f5f5f;
+   background: rgba(158, 158, 158, 0.12);
+   border: 1px solid rgba(158,158,158,0.18);
+}
+
 /* Good coverage (>75%) - Green */
 .ct_coverage_good {
     color: #90ee90;
