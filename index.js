@@ -1726,9 +1726,10 @@ function calibrate_target_size(actualSize) {
     // V34 FIX: Do NOT subtract Qdrant tokens from calibration target.
     // The truncation system already handles Qdrant in calculate_truncation_index().
     // Subtracting here causes double-subtraction and unreachable targets.
+    // Calibration should compare actualSize against the RAW target_context_size.
     if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
         const qdrantAvg = get_averaged_qdrant_tokens();
-        debug_trunc(`  Qdrant tokens (info only, not subtracted): ${qdrantAvg}`);
+        debug_trunc(`  Qdrant tokens (info only, not subtracted from calibration target): ${qdrantAvg}`);
     }
     
     const deviation = Math.abs((actualSize - calibratedTarget) / calibratedTarget);
@@ -1812,20 +1813,20 @@ function calibrate_target_size(actualSize) {
                     debug_trunc(`  → Remaining in CALIBRATING`);
                 }
             } else {
-                // V35 FIX: More lenient decay - only decay if significantly over tolerance
-                // Small overshoots (< 1% over tolerance) should not trigger decay
+                // V34 FIX: More lenient decay - only decay if significantly over tolerance
                 const toleranceOvershoot = deviation - tolerance;
-                if (toleranceOvershoot > 0.01) {  // Only decay if more than 1% over tolerance
-                    // Decay by 1 for moderate overshoot, 2 for large overshoot
-                    const decayAmount = deviation > tolerance * 1.5 ? 2 : 1;
+                if (toleranceOvershoot > 0.03) {  // 3% overshoot threshold (was 1%)
+                    // Decay by 1 for moderate, 2 only for severe (>2x tolerance)
+                    const decayAmount = deviation > tolerance * 2.0 ? 2 : 1;
                     STABLE_COUNT = Math.max(0, STABLE_COUNT - decayAmount);
                     debug_trunc(`  Outside tolerance by ${(toleranceOvershoot * 100).toFixed(1)}%, stable count decayed by ${decayAmount} to ${STABLE_COUNT}`);
+                    
+                    // Only recalculate target on significant overshoot
+                    calculate_calibrated_target(maxContext, targetUtilization);
                 } else {
                     debug_trunc(`  Marginally outside tolerance (${(toleranceOvershoot * 100).toFixed(1)}% over), preserving stable count at ${STABLE_COUNT}`);
+                    // Do NOT recalculate target for marginal misses
                 }
-                
-                // Recalculate target
-                calculate_calibrated_target(maxContext, targetUtilization);
                 debug_trunc(`  → Remaining in CALIBRATING`);
             }
             break;
@@ -1912,8 +1913,14 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
         set_settings('target_context_size', finalTarget);
         $('#ct_target_size').val(finalTarget);
         
-        // Reset truncation index since target changed
-        reset_truncation_index();
+        // V34 FIX: Only reset truncation index if NOT in active calibration
+        // Resetting during calibration destabilizes convergence
+        if (CALIBRATION_STATE !== 'CALIBRATING' && CALIBRATION_STATE !== 'RETRAINING') {
+            reset_truncation_index();
+            debug_trunc(`  Reset truncation index (not in active calibration)`);
+        } else {
+            debug_trunc(`  Skipped truncation reset (in ${CALIBRATION_STATE} state)`);
+        }
         
         debug_trunc(`  Updated target from ${currentTarget} to ${finalTarget}`);
     } else {
