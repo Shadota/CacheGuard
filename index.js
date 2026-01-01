@@ -190,6 +190,11 @@ const QDRANT_HISTORY_SIZE = 5;  // Number of samples to average
 // Summary injection tracking (V22)
 let DROPPED_SUMMARY_COUNT = 0;  // Summaries dropped due to token cap
 
+// Debug summary tracking (V33)
+let DEBUG_SEGMENT_COUNT = 0;
+let DEBUG_MAP_HITS = 0;
+let DEBUG_MAP_MISSES = 0;
+
 // Vector Statistics State (V11)
 let VECTOR_STATS = {
     // Connection health
@@ -298,6 +303,43 @@ function debug_synergy(...args) {
     }
 }
 
+// Consolidated generation summary for simplified debug output
+function log_generation_summary(data) {
+    if (!get_settings('debug_truncation')) return;
+    
+    const {
+        chatLength = 0,
+        oldIndex = 0,
+        newIndex = 0,
+        actualTokens = 0,
+        targetTokens = 0,
+        factor = 1.0,
+        state = 'UNKNOWN',
+        stableCount = 0,
+        stableThreshold = 5,
+        segmentCount = 0,
+        mapHits = 0,
+        mapMisses = 0,
+        summaryCount = 0,
+        summaryTokens = 0,
+        droppedCount = 0,
+        estimationMode = false
+    } = data;
+    
+    const mode = estimationMode ? 'Estimation (large chat)' : 'Tokenizer';
+    const indexChange = oldIndex === newIndex ? `${newIndex} (unchanged)` : `${oldIndex}→${newIndex}`;
+    const tokenDiff = actualTokens - targetTokens;
+    const tokenStatus = tokenDiff > 0 ? `${tokenDiff} over` : `${Math.abs(tokenDiff)} under`;
+    const stateStr = state === 'STABLE' ? `${state} ✓` : `${state} (${stableCount}/${stableThreshold})`;
+    
+    console.log(`[${MODULE_NAME_FANCY}][Truncation] === Generation Summary ===`);
+    console.log(`  Mode: ${mode} | Chat: ${chatLength} msgs | Index: ${indexChange}`);
+    console.log(`  Tokens: ${actualTokens} actual → ${targetTokens} target (${tokenStatus})`);
+    console.log(`  Factor: ${factor.toFixed(3)} | State: ${stateStr}`);
+    console.log(`  Segments: ${segmentCount} matched | Map: ${mapHits} hits, ${mapMisses} misses`);
+    console.log(`  Summaries: ${summaryCount} injected (${summaryTokens} tokens) | Dropped: ${droppedCount}`);
+}
+
 // Legacy debug function - routes to truncation debug for backward compatibility
 function debug(...args) {
     if (get_settings('debug_truncation') || get_settings('debug_qdrant') || get_settings('debug_synergy')) {
@@ -349,7 +391,7 @@ function count_tokens(text, padding = 0) {
     // Average ratio is ~4 chars per token for English text
     USING_ESTIMATION_MODE = true;  // SET FLAG
     const estimate = Math.floor(textLen / 4) + padding;
-    debug(`[TOKENIZER] Large input (${textLen} chars), using estimate: ${estimate} tokens`);
+    debug_trunc(`[TOKENIZER] Estimation mode: ${textLen} chars → ${estimate} tokens (4 chars/token)`);
     return estimate;
 }
 
@@ -495,25 +537,6 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
         });
     }
     
-    // V33 DIAGNOSTIC: Log segment summary
-    if (get_settings('debug_truncation')) {
-        debug_trunc('  === SEGMENT SUMMARY ===');
-        debug_trunc(`  Total segments: ${segments.length}`);
-        const showCount = Math.min(5, segments.length);
-        for (let i = 0; i < showCount; i++) {
-            debug_trunc(`    [${i}] role=${segments[i].role}, tokens=${segments[i].tokenCount}`);
-        }
-        if (segments.length > 10) {
-            debug_trunc(`    ... (${segments.length - 10} more) ...`);
-            for (let i = Math.max(showCount, segments.length - 5); i < segments.length; i++) {
-                debug_trunc(`    [${i}] role=${segments[i].role}, tokens=${segments[i].tokenCount}`);
-            }
-        } else if (segments.length > showCount) {
-            for (let i = showCount; i < segments.length; i++) {
-                debug_trunc(`    [${i}] role=${segments[i].role}, tokens=${segments[i].tokenCount}`);
-            }
-        }
-    }
     
     return segments;
 }
@@ -535,34 +558,10 @@ function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
     // After truncation, only the LAST N messages are in the prompt, not all messages
     const startIndex = TRUNCATION_INDEX || 0;
     
-    // V33 DIAGNOSTIC: Log starting conditions
-    debug_trunc('  === TOKEN MAP BUILDING ===');
-    debug_trunc(`  Segments available: ${segments.length}`);
-    debug_trunc(`  Chat length: ${chat.length}`);
-    debug_trunc(`  TRUNCATION_INDEX (startIndex): ${startIndex}`);
-    debug_trunc(`  Messages to match: ${chat.length - startIndex}`);
-    
-    // Log first few chat messages for verification
-    debug_trunc('  First 3 chat messages (from startIndex):');
-    for (let dbgI = startIndex; dbgI < Math.min(startIndex + 3, chat.length); dbgI++) {
-        const m = chat[dbgI];
-        if (m) {
-            debug_trunc(`    Chat[${dbgI}]: is_system=${m.is_system}, is_user=${m.is_user}, expected=${m.is_user ? 'user' : 'assistant'}`);
-        }
-    }
-    
-    // Log first few segments for verification
-    debug_trunc('  First 3 segments:');
-    for (let dbgI = 0; dbgI < Math.min(3, segments.length); dbgI++) {
-        debug_trunc(`    Segment[${dbgI}]: role=${segments[dbgI].role}, tokens=${segments[dbgI].tokenCount}`);
-    }
     
     // Check if all segments are the same role (completion/roleplay mode)
     const allSameRole = segments.length > 0 && segments.every(s => s.role === segments[0].role);
     if (allSameRole && segments.length > 1) {
-        debug_trunc(`  Detected completion mode: all ${segments.length} segments are '${segments[0].role}'`);
-        debug_trunc(`  Using sequential mapping instead of role matching`);
-        
         // Sequential mapping: map segments to non-system chat messages in order
         let segmentIdx = 0;
         for (let chatIdx = startIndex; chatIdx < chat.length && segmentIdx < segments.length; chatIdx++) {
@@ -570,11 +569,9 @@ function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
             if (msg.is_system) continue; // Skip system messages
             
             map.set(chatIdx, segments[segmentIdx].tokenCount);
-            debug_trunc(`    Map[${chatIdx}] = ${segments[segmentIdx].tokenCount} tokens (sequential)`);
             segmentIdx++;
         }
         
-        debug_trunc(`  Sequential mapping complete: ${map.size} entries`);
         return map;
     }
     
@@ -589,28 +586,15 @@ function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
         
         let expected_role = message.is_user ? 'user' : 'assistant';
         
-        // V33 DIAGNOSTIC: Log matching attempt
-        const segRole = segment_index < segments.length ? segments[segment_index].role : 'EOF';
-        debug_trunc(`  [${i - startIndex}] Chat[${i}] expects '${expected_role}', Segment[${segment_index}] is '${segRole}'`);
-        
-        // Find next matching segment (with diagnostic logging)
-        let skipped = 0;
+        // Find next matching segment
         while (segment_index < segments.length && segments[segment_index].role !== expected_role) {
-            debug_trunc(`    SKIP Segment[${segment_index}] role='${segments[segment_index].role}' (want '${expected_role}')`);
             segment_index += 1;
-            skipped++;
-            if (skipped > segments.length) {
-                debug_trunc(`    ERROR: Skipped entire segment array without finding '${expected_role}'`);
-                break;
-            }
         }
         
         if (segment_index >= segments.length) {
-            debug_trunc(`    STOP: Ran out of segments at segment_index=${segment_index}`);
             break;
         }
         
-        debug_trunc(`    MATCH: Chat[${i}] → Segment[${segment_index}] = ${segments[segment_index].tokenCount} tokens`);
         map.set(i, segments[segment_index].tokenCount);
         segment_index += 1;
     }
@@ -927,14 +911,6 @@ function calculate_truncation_index() {
     const minKeep = get_settings('min_messages_to_keep');
     const maxContext = getMaxContextSize();
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
-    debug_trunc(`═══ TRUNCATION CALCULATION START ═══`);
-    debug_trunc(`  Chat length: ${chat.length} messages`);
-    debug_trunc(`  Current truncation index: ${TRUNCATION_INDEX || 0}`);
-    debug_trunc(`  Target size: ${targetSize} tokens`);
-    debug_trunc(`  Max context: ${maxContext} tokens`);
-    debug_trunc(`  Batch size: ${batchSize}`);
-    debug_trunc(`  Min messages to keep: ${minKeep}`);
     
     // SYNERGY: Account for Qdrant tokens in target size
     if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
@@ -955,11 +931,6 @@ function calculate_truncation_index() {
         return 0;
     }
     
-    debug_trunc(`  `);
-    debug_trunc(`  === CONTEXT ANALYSIS ===`);
-    debug_trunc(`  Current full prompt: ${currentPromptSize} tokens`);
-    debug_trunc(`  Target full: ${targetSize} tokens`);
-    debug_trunc(`  Over target by: ${currentPromptSize - targetSize} tokens`);
     
     // Check if we're under target
     if (currentPromptSize <= targetSize) {
@@ -1010,8 +981,6 @@ function calculate_truncation_index() {
     let promptChatTokens = 0;
     let nonChatBudget;
     
-    debug_trunc(`  `);
-    debug_trunc(`  === PROMPT ANALYSIS ===`);
     
     if (!last_raw_prompt) {
         // No raw prompt - estimate non-chat budget as 15% of current prompt size
@@ -1026,7 +995,7 @@ function calculate_truncation_index() {
         let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         if (segments && segments.length > 0) {
             promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
-            debug_trunc(`  Chat segments found: ${segments.length}`);
+            DEBUG_SEGMENT_COUNT = segments.length;
         }
         
         // V35 FIX: Do NOT apply correction factor to non-chat budget
@@ -1035,9 +1004,6 @@ function calculate_truncation_index() {
         const rawNonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
         nonChatBudget = rawNonChatBudget;  // Use raw value directly
         
-        debug_trunc(`  Raw prompt size: ${totalPromptTokens} tokens`);
-        debug_trunc(`  Chat tokens (from segments): ${promptChatTokens} tokens`);
-        debug_trunc(`  Non-chat budget: ${nonChatBudget} tokens (measured from prompt, no correction needed)`);
     }
     
     // Track token map usage
@@ -1051,12 +1017,14 @@ function calculate_truncation_index() {
             let mapped = message_token_map.get(index);
             if (mapped !== undefined) {
                 map_hits++;
+                DEBUG_MAP_HITS++;
                 return mapped;
             }
         }
         
         // Fall back to estimation
         map_misses++;
+        DEBUG_MAP_MISSES++;
         const roleHeaderTokens = message.is_user ? promptHeaderTokens.user : promptHeaderTokens.assistant;
         return count_tokens(message.mes) + roleHeaderTokens;
     }
@@ -1123,12 +1091,6 @@ function calculate_truncation_index() {
     // Current chat size
     let currentChatSize = estimateChatSize(currentIndex);
     
-    debug_trunc(`  `);
-    debug_trunc(`  === CHAT SIZE ESTIMATION ===`);
-    debug_trunc(`  Starting index: ${currentIndex}`);
-    debug_trunc(`  Correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
-    debug_trunc(`  Estimated chat size: ${currentChatSize} tokens`);
-    debug_trunc(`  Total estimated: ${currentChatSize + nonChatBudget} tokens`);
     
     // If we're over target, truncate in batches
     if (currentChatSize + nonChatBudget > targetSize) {
@@ -1174,19 +1136,8 @@ function calculate_truncation_index() {
     const underTarget = currentTotal < targetSize;
     const hasHeadroom = targetSize - currentTotal;
     
-    debug_trunc(`  `);
-    debug_trunc(`  === V27 TRUNCATION REDUCTION CHECK ===`);
-    debug_trunc(`  Current truncation index: ${finalIndex}`);
-    debug_trunc(`  Estimated chat size: ${estimateChatSize(finalIndex)} tokens`);
-    debug_trunc(`  Non-chat budget: ${nonChatBudget} tokens`);
-    debug_trunc(`  Current total: ${currentTotal} tokens`);
-    debug_trunc(`  Target size: ${targetSize} tokens`);
-    debug_trunc(`  Under target: ${underTarget} (headroom: ${hasHeadroom} tokens)`);
     
     if (underTarget && finalIndex > 0) {
-        debug_trunc(`  `);
-        debug_trunc(`  === ATTEMPTING REDUCTION ===`);
-        
         // Greedily include more messages while under target
         let reducedIndex = finalIndex;
         let iterations = 0;
@@ -1200,7 +1151,6 @@ function calculate_truncation_index() {
             const msg = chat[candidateIdx];
             
             if (!msg || msg.is_system) {
-                debug_trunc(`    Skipping message ${candidateIdx} (system or missing)`);
                 reducedIndex--;
                 continue;
             }
@@ -1209,56 +1159,15 @@ function calculate_truncation_index() {
             const candidateSize = estimateChatSize(candidateIdx);
             const candidateTotal = candidateSize + nonChatBudget;
             
-            // Get individual message stats for debugging
-            const msgTokensRaw = estimateMessagePromptTokens(msg, candidateIdx);
-            const msgTokensCorrected = Math.floor(msgTokensRaw * CHAT_TOKEN_CORRECTION_FACTOR);
-            const summaryText = get_memory(msg);
-            const summaryTokens = summaryText ? count_tokens(summaryText) + sepSize : 0;
-            const tokenDifference = msgTokensCorrected - summaryTokens;
-            
-            debug_trunc(`    Message ${candidateIdx}:`);
-            debug_trunc(`      Full tokens: ${msgTokensCorrected} (raw: ${msgTokensRaw}, factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)})`);
-            debug_trunc(`      Summary tokens: ${summaryTokens}`);
-            debug_trunc(`      Net cost to include: +${tokenDifference} tokens`);
-            debug_trunc(`      Candidate total if included: ${candidateTotal} tokens`);
-            debug_trunc(`      Would exceed target: ${candidateTotal > targetSize}`);
-            
             if (candidateTotal <= targetSize) {
                 reducedIndex--;
-                debug_trunc(`      → INCLUDING message ${candidateIdx}`);
             } else {
-                debug_trunc(`      → STOPPING: would exceed target by ${candidateTotal - targetSize} tokens`);
                 break;
             }
         }
         
-        if (iterations >= MAX_ITERATIONS) {
-            debug_trunc(`  WARNING: Hit max iterations (${MAX_ITERATIONS})`);
-        }
-        
         if (reducedIndex < finalIndex) {
-            const before = estimateChatSize(finalIndex);
-            const after = estimateChatSize(reducedIndex);
-            const tokensRecovered = after - before;  // Note: this is POSITIVE because we're including more
-            debug_trunc(`  `);
-            debug_trunc(`  === REDUCTION RESULT ===`);
-            debug_trunc(`  Index changed: ${finalIndex} → ${reducedIndex}`);
-            debug_trunc(`  Messages now included: ${finalIndex - reducedIndex} more`);
-            debug_trunc(`  Token change: ${tokensRecovered} tokens (expected positive)`);
             finalIndex = reducedIndex;
-        } else {
-            debug_trunc(`  `);
-            debug_trunc(`  === NO REDUCTION POSSIBLE ===`);
-            debug_trunc(`  Could not include any additional messages`);
-        }
-    } else {
-        debug_trunc(`  `);
-        debug_trunc(`  === REDUCTION SKIPPED ===`);
-        if (!underTarget) {
-            debug_trunc(`  Reason: Already at/over target (${currentTotal} >= ${targetSize})`);
-        }
-        if (finalIndex <= 0) {
-            debug_trunc(`  Reason: No truncation active (finalIndex = ${finalIndex})`);
         }
     }
     
@@ -1266,34 +1175,6 @@ function calculate_truncation_index() {
     const predictedChatSizeRaw = estimateChatSizeRaw(finalIndex);  // V29: Raw prediction for factor calculation
     const predictedTotal = predictedChatSize + nonChatBudget;
     
-    debug_trunc(`  `);
-    debug_trunc(`  === MESSAGE TOKEN MAP ===`);
-    debug_trunc(`  Map stats: ${map_hits} hits, ${map_misses} misses (${message_token_map ? message_token_map.size : 0} entries)`);
-    
-    // V33 DIAGNOSTIC: Show map entries if available
-    if (message_token_map && message_token_map.size > 0) {
-        debug_trunc(`  Map entries (first 10):`);
-        let count = 0;
-        for (const [idx, tokens] of message_token_map.entries()) {
-            if (count >= 10) {
-                debug_trunc(`    ... and ${message_token_map.size - 10} more`);
-                break;
-            }
-            debug_trunc(`    Chat[${idx}] = ${tokens} tokens`);
-            count++;
-        }
-    } else {
-        debug_trunc(`  WARNING: Token map is empty!`);
-    }
-    
-    debug_trunc(`  `);
-    debug_trunc(`  === FINAL RESULT ===`);
-    debug_trunc(`  New truncation index: ${finalIndex} (was ${currentIndex}, ${finalIndex > currentIndex ? '+' + (finalIndex - currentIndex) + ' messages excluded' : 'no change'})`);
-    debug_trunc(`  Predicted chat size: ${predictedChatSize} tokens (raw: ${predictedChatSizeRaw})`);
-    debug_trunc(`  Predicted total: ${predictedTotal} tokens`);
-    debug_trunc(`  ${predictedTotal <= targetSize ? 'Under' : 'Over'} target by: ${Math.abs(predictedTotal - targetSize)} tokens`);
-    debug_trunc(`═══ TRUNCATION CALCULATION END ═══`);
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
     
     // Store predictions for comparison with actual results
     LAST_PREDICTED_SIZE = predictedTotal;
@@ -1643,33 +1524,9 @@ function update_status_display() {
         
         debug_trunc(`  Bounded factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} (min: ${MIN_CORRECTION_FACTOR}, max: ${MAX_CORRECTION_FACTOR})`);
         
-        // Log correction factor updates
-        debug_trunc(`═══════════════════════════════════════════════════════════════`);
-        debug_trunc(`═══ CORRECTION FACTOR UPDATE ═══`);
-        debug_trunc(`  PREDICTED total: ${LAST_PREDICTED_SIZE} tokens`);
-        debug_trunc(`  ACTUAL total: ${actualSize} tokens`);
-        debug_trunc(`  Difference: ${actualSize - LAST_PREDICTED_SIZE} tokens (${((actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
-        debug_trunc(`  `);
-        debug_trunc(`  PREDICTED chat: ${LAST_PREDICTED_CHAT_SIZE} tokens`);
-        debug_trunc(`  ACTUAL chat: ${actualChatTokens} tokens`);
-        debug_trunc(`  Chat difference: ${actualChatTokens - LAST_PREDICTED_CHAT_SIZE} tokens (${((actualChatTokens - LAST_PREDICTED_CHAT_SIZE) / LAST_PREDICTED_CHAT_SIZE * 100).toFixed(1)}%)`);
-        debug_trunc(`  `);
-        debug_trunc(`  PREDICTED non-chat: ${LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
-        debug_trunc(`  ACTUAL non-chat: ${actualNonChatTokens} tokens`);
-        debug_trunc(`  Non-chat difference: ${actualNonChatTokens - LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
-        debug_trunc(`  `);
-        debug_trunc(`  New correction factor: ${newCorrectionFactor.toFixed(3)}`);
-        debug_trunc(`  Smoothed factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} (was ${oldCorrectionFactor.toFixed(3)})`);
-        debug_trunc(`═══════════════════════════════════════════════════════════════`);
-        
-        // Log comparison for debugging context mismatch issues
-        debug_trunc(`  `);
-        debug_trunc(`  === TOKENIZER COMPARISON ===`);
-        debug_trunc(`  Extension tokenizer: ${actualSize} tokens`);
-        debug_trunc(`  Correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
-        debug_trunc(`  Corrected estimate: ${Math.floor(actualSize * CHAT_TOKEN_CORRECTION_FACTOR)} tokens`);
-        debug_trunc(`  NOTE: Compare 'Corrected estimate' with your API's reported token count`);
-        debug_trunc(`  If they differ significantly, click 'Force Recalibrate' in Overview tab`);
+        // Log correction factor updates (simplified)
+        debug_trunc(`Factor Update: ${oldCorrectionFactor.toFixed(3)}→${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} | Pred: ${LAST_PREDICTED_SIZE} Actual: ${actualSize} (${((actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
+        debug_trunc(`  Chat: pred ${LAST_PREDICTED_CHAT_SIZE} actual ${actualChatTokens} | Non-chat: pred ${LAST_PREDICTED_NON_CHAT_SIZE} actual ${actualNonChatTokens}`);
         
         // V34 BUG-002 FIX: Defensive save after correction factor update
         // Ensures factor is persisted immediately after being learned
@@ -1708,6 +1565,32 @@ function update_status_display() {
     debug(`  Display shown, visibility: ${$display.css('display')}`);
     
     LAST_ACTUAL_PROMPT_SIZE = actualSize;
+    
+    // Call generation summary with collected data
+    const ctx = getContext();
+    const chat = ctx.chat;
+    const summaryIndexes = collect_summary_indexes();
+    const summaryInjection = get_summary_injection();
+    const summaryTokens = summaryInjection ? count_tokens(summaryInjection) : 0;
+    
+    log_generation_summary({
+        chatLength: chat.length,
+        oldIndex: TRUNCATION_INDEX || 0,
+        newIndex: TRUNCATION_INDEX || 0,
+        actualTokens: actualSize,
+        targetTokens: get_settings('target_context_size'),
+        factor: CHAT_TOKEN_CORRECTION_FACTOR,
+        state: CALIBRATION_STATE,
+        stableCount: STABLE_COUNT,
+        stableThreshold: STABLE_THRESHOLD,
+        segmentCount: DEBUG_SEGMENT_COUNT,
+        mapHits: DEBUG_MAP_HITS,
+        mapMisses: DEBUG_MAP_MISSES,
+        summaryCount: summaryIndexes.length,
+        summaryTokens: summaryTokens,
+        droppedCount: DROPPED_SUMMARY_COUNT,
+        estimationMode: USING_ESTIMATION_MODE
+    });
     
     // Run auto-calibration if enabled
     if (get_settings('auto_calibrate_target')) {
@@ -1774,43 +1657,19 @@ function calibrate_target_size(actualSize) {
     // Keep utilization for display/logging purposes
     const currentUtilization = actualSize / maxContext;
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
-    debug_trunc(`═══ CALIBRATION STATE MACHINE ═══`);
-    debug_trunc(`  Current state: ${CALIBRATION_STATE}`);
-    debug_trunc(`  Max context: ${maxContext} tokens`);
-    debug_trunc(`  Target utilization: ${(targetUtilization * 100).toFixed(1)}%`);
-    debug_trunc(`  Start threshold: ${startThreshold.toLocaleString()} tokens`);
-    debug_trunc(`  Tolerance: ${(tolerance * 100).toFixed(1)}%`);
-    debug_trunc(`  `);
-    debug_trunc(`  Actual prompt: ${actualSize} tokens`);
-    debug_trunc(`  Calibrated target: ${calibratedTarget} tokens`);
-    debug_trunc(`  Difference: ${actualSize - calibratedTarget} tokens (${actualSize < calibratedTarget ? 'under' : 'over'})`);
-    debug_trunc(`  Deviation: ${(deviation * 100).toFixed(1)}%`);
-    debug_trunc(`  Utilization: ${(currentUtilization * 100).toFixed(1)}% of max context`);
-    debug_trunc(`  Within tolerance (${(tolerance * 100).toFixed(1)}%): ${deviation <= tolerance ? 'YES' : 'NO'}`);
     
     switch (CALIBRATION_STATE) {
         case 'WAITING':
             // Check if we've reached the threshold to start calibrating
             // V34 BUG-001 FIX: Also check if truncation is active (messages being excluded)
             // If truncation is active, we should start calibrating immediately even if under threshold
-            debug_trunc(`  `);
             const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
-            debug_trunc(`  Truncation active: ${truncationActive} (index: ${TRUNCATION_INDEX})`);
             
             if (actualSize < startThreshold && !truncationActive) {
-                debug_trunc(`  Waiting: ${actualSize.toLocaleString()} tokens < threshold ${startThreshold.toLocaleString()} tokens`);
-                debug_trunc(`  → Remaining in WAITING`);
             } else {
                 // Transition to INITIAL_TRAINING
                 CALIBRATION_STATE = 'INITIAL_TRAINING';
                 GENERATION_COUNT = 0;
-                if (truncationActive) {
-                    debug_trunc(`  Truncation is active (${TRUNCATION_INDEX} messages excluded) - starting calibration`);
-                } else {
-                    debug_trunc(`  Threshold reached: ${actualSize.toLocaleString()} tokens >= ${startThreshold.toLocaleString()} tokens`);
-                }
-                debug_trunc(`  → Transitioning to INITIAL_TRAINING`);
                 toastr.info('Context threshold reached - starting calibration training', MODULE_NAME_FANCY);
             }
             break;
@@ -1818,36 +1677,25 @@ function calibrate_target_size(actualSize) {
         case 'INITIAL_TRAINING':
             // Wait for correction factor to stabilize
             GENERATION_COUNT++;
-            debug_trunc(`  `);
-            debug_trunc(`  Training generation ${GENERATION_COUNT}/${TRAINING_GENERATIONS}`);
             
             if (GENERATION_COUNT >= TRAINING_GENERATIONS) {
                 CALIBRATION_STATE = 'CALIBRATING';
                 GENERATION_COUNT = 0;
-                debug_trunc(`  → Transitioning to CALIBRATING`);
-                
                 // Calculate initial target based on learned correction factor
                 calculate_calibrated_target(maxContext, targetUtilization);
-            } else {
-                debug_trunc(`  → Remaining in INITIAL_TRAINING`);
             }
             break;
             
         case 'CALIBRATING':
             // Apply calibration and check if we're within tolerance
-            debug_trunc(`  `);
             if (deviation <= tolerance) {
                 STABLE_COUNT++;
-                debug_trunc(`  Stable count: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
                 
                 if (STABLE_COUNT >= STABLE_THRESHOLD) {
                     CALIBRATION_STATE = 'STABLE';
                     DELETION_COUNT = 0;  // Reset deletion counter on reaching stable
-                    debug_trunc(`  → Transitioning to STABLE`);
                     toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
                     update_resilience_ui();
-                } else {
-                    debug_trunc(`  → Remaining in CALIBRATING`);
                 }
             } else {
                 // V34 FIX: More lenient decay - only decay if significantly over tolerance
@@ -1856,53 +1704,38 @@ function calibrate_target_size(actualSize) {
                     // Decay by 1 for moderate, 2 only for severe (>2x tolerance)
                     const decayAmount = deviation > tolerance * 2.0 ? 2 : 1;
                     STABLE_COUNT = Math.max(0, STABLE_COUNT - decayAmount);
-                    debug_trunc(`  Outside tolerance by ${(toleranceOvershoot * 100).toFixed(1)}%, stable count decayed by ${decayAmount} to ${STABLE_COUNT}`);
-                    
                     // Only recalculate target on significant overshoot
                     calculate_calibrated_target(maxContext, targetUtilization);
-                } else {
-                    debug_trunc(`  Marginally outside tolerance (${(toleranceOvershoot * 100).toFixed(1)}% over), preserving stable count at ${STABLE_COUNT}`);
-                    // Do NOT recalculate target for marginal misses
                 }
-                debug_trunc(`  → Remaining in CALIBRATING`);
             }
             break;
             
         case 'RETRAINING':
             // Similar to initial training but after destabilization
             RETRAIN_COUNT++;
-            debug_trunc(`  `);
-            debug_trunc(`  Retraining generation ${RETRAIN_COUNT}/${TRAINING_GENERATIONS}`);
             
             if (RETRAIN_COUNT >= TRAINING_GENERATIONS) {
                 CALIBRATION_STATE = 'CALIBRATING';
                 RETRAIN_COUNT = 0;
                 STABLE_COUNT = 0;
-                debug_trunc(`  → Transitioning back to CALIBRATING`);
-                
                 calculate_calibrated_target(maxContext, targetUtilization);
-            } else {
-                debug_trunc(`  → Remaining in RETRAINING`);
             }
             break;
             
         case 'STABLE':
             // Monitor for destabilization
-            debug_trunc(`  `);
             if (deviation > tolerance * 1.5) {  // Use 1.5x tolerance to avoid bouncing
-                debug_trunc(`  Destabilized! Deviation ${(deviation * 100).toFixed(1)}% > ${(tolerance * 1.5 * 100).toFixed(1)}%`);
-                debug_trunc(`  → Transitioning to RETRAINING`);
                 CALIBRATION_STATE = 'RETRAINING';
                 RETRAIN_COUNT = 0;
                 STABLE_COUNT = 0;
                 toastr.warning('Calibration destabilized - retraining...', MODULE_NAME_FANCY);
-            } else {
-                debug_trunc(`  → Remaining in STABLE (monitoring)`);
             }
             break;
     }
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
+    // Single calibration summary line
+    debug_trunc(`Calibration: ${CALIBRATION_STATE} | Dev: ${(deviation * 100).toFixed(1)}% | Stable: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
+    
     save_truncation_index();
     update_calibration_ui();
     update_overview_tab();  // BUG-001 FIX: Sync Overview tab after state transitions
