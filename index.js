@@ -1812,12 +1812,12 @@ function calibrate_target_size(actualSize) {
                     debug_trunc(`  → Remaining in CALIBRATING`);
                 }
             } else {
-                // V33 FIX: More lenient decay - only decay if significantly over tolerance
-                // Small overshoots (< 3% over tolerance) should not trigger decay
+                // V35 FIX: More lenient decay - only decay if significantly over tolerance
+                // Small overshoots (< 1% over tolerance) should not trigger decay
                 const toleranceOvershoot = deviation - tolerance;
-                if (toleranceOvershoot > 0.03) {  // Only decay if more than 3% over tolerance
-                    // Decay by 1 for moderate overshoot, 2 for severe overshoot (>2x tolerance)
-                    const decayAmount = deviation > tolerance * 2.0 ? 2 : 1;
+                if (toleranceOvershoot > 0.01) {  // Only decay if more than 1% over tolerance
+                    // Decay by 1 for moderate overshoot, 2 for large overshoot
+                    const decayAmount = deviation > tolerance * 1.5 ? 2 : 1;
                     STABLE_COUNT = Math.max(0, STABLE_COUNT - decayAmount);
                     debug_trunc(`  Outside tolerance by ${(toleranceOvershoot * 100).toFixed(1)}%, stable count decayed by ${decayAmount} to ${STABLE_COUNT}`);
                 } else {
@@ -1912,13 +1912,8 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
         set_settings('target_context_size', finalTarget);
         $('#ct_target_size').val(finalTarget);
         
-        // V33 FIX: Don't reset truncation during calibration/retraining - destabilizes learning
-        if (CALIBRATION_STATE !== 'CALIBRATING' && CALIBRATION_STATE !== 'RETRAINING') {
-            reset_truncation_index();
-            debug_trunc(`  Reset truncation index due to target change`);
-        } else {
-            debug_trunc(`  Skipped truncation reset (state: ${CALIBRATION_STATE})`);
-        }
+        // Reset truncation index since target changed
+        reset_truncation_index();
         
         debug_trunc(`  Updated target from ${currentTarget} to ${finalTarget}`);
     } else {
