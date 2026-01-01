@@ -523,7 +523,10 @@ function load_truncation_index() {
         TRUNCATION_INDEX = chat_metadata[MODULE_NAME].truncation_index;
         debug(`Loaded truncation index: ${TRUNCATION_INDEX}`);
     } else {
-        debug(`No truncation index found`);
+        // V34 BUG-002 FIX: Debug logging to verify no saved index exists
+        debug(`No truncation index found in metadata`);
+        debug(`  chat_metadata exists: ${!!chat_metadata}`);
+        debug(`  MODULE_NAME exists in metadata: ${!!chat_metadata?.[MODULE_NAME]}`);
     }
     
     // Also load correction factor if saved (Fix 4.2: Preserve correction factor across chat switches)
@@ -1518,6 +1521,10 @@ function update_status_display() {
         debug_trunc(`  Corrected estimate: ${Math.floor(actualSize * CHAT_TOKEN_CORRECTION_FACTOR)} tokens`);
         debug_trunc(`  NOTE: Compare 'Corrected estimate' with your API's reported token count`);
         debug_trunc(`  If they differ significantly, click 'Force Recalibrate' in Overview tab`);
+        
+        // V34 BUG-002 FIX: Defensive save after correction factor update
+        // Ensures factor is persisted immediately after being learned
+        save_truncation_index();
     }
     
     // Determine color based on error percentage
@@ -1626,15 +1633,24 @@ function calibrate_target_size(actualSize) {
     switch (CALIBRATION_STATE) {
         case 'WAITING':
             // Check if we've reached the threshold to start calibrating
+            // V34 BUG-001 FIX: Also check if truncation is active (messages being excluded)
+            // If truncation is active, we should start calibrating immediately even if under threshold
             debug_trunc(`  `);
-            if (actualSize < startThreshold) {
+            const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
+            debug_trunc(`  Truncation active: ${truncationActive} (index: ${TRUNCATION_INDEX})`);
+            
+            if (actualSize < startThreshold && !truncationActive) {
                 debug_trunc(`  Waiting: ${actualSize.toLocaleString()} tokens < threshold ${startThreshold.toLocaleString()} tokens`);
                 debug_trunc(`  → Remaining in WAITING`);
             } else {
                 // Transition to INITIAL_TRAINING
                 CALIBRATION_STATE = 'INITIAL_TRAINING';
                 GENERATION_COUNT = 0;
-                debug_trunc(`  Threshold reached: ${actualSize.toLocaleString()} tokens >= ${startThreshold.toLocaleString()} tokens`);
+                if (truncationActive) {
+                    debug_trunc(`  Truncation is active (${TRUNCATION_INDEX} messages excluded) - starting calibration`);
+                } else {
+                    debug_trunc(`  Threshold reached: ${actualSize.toLocaleString()} tokens >= ${startThreshold.toLocaleString()} tokens`);
+                }
                 debug_trunc(`  → Transitioning to INITIAL_TRAINING`);
                 toastr.info('Context threshold reached - starting calibration training', MODULE_NAME_FANCY);
             }
@@ -1852,7 +1868,13 @@ function update_calibration_ui() {
     switch (CALIBRATION_STATE) {
         case 'WAITING':
             $phase.text('Waiting').addClass('ct_phase_waiting');
-            $progress.text(`${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()} tokens`);
+            // V34 BUG-003 FIX: Show truncation status instead of confusing token numbers
+            const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
+            if (truncationActive) {
+                $progress.text(`Truncation active (${TRUNCATION_INDEX} excluded)`);
+            } else {
+                $progress.text(`${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()} tokens`);
+            }
             break;
         case 'INITIAL_TRAINING':
             $phase.text('Initial Training').addClass('ct_phase_training');
@@ -2059,7 +2081,13 @@ function update_overview_tab() {
             case 'WAITING':
                 phaseText = 'Waiting';
                 phaseClass = 'ct_phase_waiting';
-                progressText = `${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()}`;
+                // V34 BUG-001 FIX: Show truncation status in WAITING phase
+                const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
+                if (truncationActive) {
+                    progressText = `Truncation active (${TRUNCATION_INDEX} excluded)`;
+                } else {
+                    progressText = `${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()}`;
+                }
                 break;
             case 'INITIAL_TRAINING':
                 phaseText = 'Initial Training';
