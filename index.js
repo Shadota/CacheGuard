@@ -1902,7 +1902,6 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
     
     debug_trunc(`  Calculating calibrated target:`);
     debug_trunc(`    Ideal target: ${idealTarget}`);
-    debug_trunc(`    Qdrant adjustment: ${qdrantAdjustment}`);
     debug_trunc(`    Correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
     debug_trunc(`    Raw adjusted target: ${rawAdjustedTarget}`);
     debug_trunc(`    Dampened target: ${adjustedTarget}`);
