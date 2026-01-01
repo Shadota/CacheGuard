@@ -1599,9 +1599,14 @@ function calibrate_target_size(actualSize) {
     // Fix 3.1: Use dynamic tolerance that accounts for Qdrant variance
     const tolerance = get_dynamic_tolerance();
     
-    // Calculate current utilization
+    // V33 FIX: Calculate deviation against calibrated target, not utilization
+    // Question: "Is actual prompt close to our target_context_size?"
+    // NOT: "Is actualSize/maxContext close to targetUtilization?"
+    const calibratedTarget = get_settings('target_context_size');
+    const deviation = Math.abs((actualSize - calibratedTarget) / calibratedTarget);
+    
+    // Keep utilization for display/logging purposes
     const currentUtilization = actualSize / maxContext;
-    const deviation = Math.abs(currentUtilization - targetUtilization);
     
     debug_trunc(`═══════════════════════════════════════════════════════════════`);
     debug_trunc(`═══ CALIBRATION STATE MACHINE ═══`);
@@ -1612,9 +1617,11 @@ function calibrate_target_size(actualSize) {
     debug_trunc(`  Tolerance: ${(tolerance * 100).toFixed(1)}%`);
     debug_trunc(`  `);
     debug_trunc(`  Actual prompt: ${actualSize} tokens`);
-    debug_trunc(`  Actual utilization: ${(currentUtilization * 100).toFixed(1)}%`);
-    debug_trunc(`  Deviation from target: ${(deviation * 100).toFixed(1)}%`);
-    debug_trunc(`  Within tolerance: ${deviation <= tolerance ? 'YES' : 'NO'}`);
+    debug_trunc(`  Calibrated target: ${calibratedTarget} tokens`);
+    debug_trunc(`  Difference: ${actualSize - calibratedTarget} tokens (${actualSize < calibratedTarget ? 'under' : 'over'})`);
+    debug_trunc(`  Deviation: ${(deviation * 100).toFixed(1)}%`);
+    debug_trunc(`  Utilization: ${(currentUtilization * 100).toFixed(1)}% of max context`);
+    debug_trunc(`  Within tolerance (${(tolerance * 100).toFixed(1)}%): ${deviation <= tolerance ? 'YES' : 'NO'}`);
     
     switch (CALIBRATION_STATE) {
         case 'WAITING':
@@ -1754,10 +1761,10 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
     debug_trunc(`    Dampened target: ${adjustedTarget}`);
     debug_trunc(`    Final target: ${finalTarget}`);
     
-    // Fix 3.3: Only update if significantly different (>5% change, increased from 2%)
+    // V33: Reduced from 5% to 3% - dampening already prevents oscillation
     const changePct = Math.abs(finalTarget - currentTarget) / currentTarget;
     
-    if (changePct > 0.05) {
+    if (changePct > 0.03) {
         set_settings('target_context_size', finalTarget);
         $('#ct_target_size').val(finalTarget);
         
