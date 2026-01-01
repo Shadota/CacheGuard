@@ -1620,3 +1620,37 @@
 .ct_advanced_section_header i {
     opacity: 0.7;
 }
+
+/* Estimation Mode Warning Banner */
+.ct_estimation_warning {
+    background-color: #8B0000;
+    border: 2px solid #FF4444;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    color: #FFCCCC;
+    font-weight: bold;
+    text-align: center;
+    animation: ct-pulse-warning 2s infinite;
+}
+
+.ct_estimation_warning i {
+    color: #FF6666;
+    margin-right: 8px;
+    font-size: 1.1em;
+}
+
+.ct_estimation_warning span {
+    font-size: 0.95em;
+}
+
+@keyframes ct-pulse-warning {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 8px rgba(255, 68, 68, 0.5);
+    }
+    50% {
+        opacity: 0.85;
+        box-shadow: 0 0 15px rgba(255, 68, 68, 0.8);
+    }
+}

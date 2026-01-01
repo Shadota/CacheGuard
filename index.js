@@ -160,6 +160,9 @@ Recent chat always takes precedence over these notes.
 // Global state
 let TRUNCATION_INDEX = null;  // Current truncation position
 
+// Estimation mode flag - true when char-based fallback is used instead of tokenizer
+let USING_ESTIMATION_MODE = false;
+
 // Popout state
 let POPOUT_VISIBLE = false;
 let POPOUT_LOCKED = false;
@@ -324,24 +327,30 @@ function set_settings(key, value) {
     saveSettingsDebounced();
 }
 
-// Token counting
+// Token counting with fallback for large inputs
+// SillyTavern's tokenizer returns 0 for inputs > ~200K chars
+const TOKENIZER_CHAR_LIMIT = 150000;  // Conservative limit
+
 function count_tokens(text, padding = 0) {
+    if (!text) return padding;
+    
     const ctx = getContext();
-    const result = ctx.getTokenCount(text, padding);
+    const textLen = text.length;
     
-    // DIAGNOSTIC: Log every tokenizer call with context
-    const textPreview = text ? text.substring(0, 50).replace(/\n/g, '\\n') : '<null>';
-    const textLen = text ? text.length : 0;
-    debug(`[TOKENIZER] Input: ${textLen} chars, Result: ${result}, Preview: "${textPreview}..."`);
-    
-    // DIAGNOSTIC: Log tokenizer state
-    if (result === 0 && textLen > 0) {
-        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ⚠️ Returned 0 for ${textLen} char input!`);
-        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ctx.getTokenCount type: ${typeof ctx.getTokenCount}`);
-        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ctx available methods:`, Object.keys(ctx).filter(k => typeof ctx[k] === 'function').join(', '));
+    // For small inputs, use tokenizer directly
+    if (textLen <= TOKENIZER_CHAR_LIMIT) {
+        const result = ctx.getTokenCount(text, padding);
+        // Clear estimation flag when tokenizer works
+        USING_ESTIMATION_MODE = false;
+        return result;
     }
     
-    return result;
+    // For large inputs, use character-based estimate
+    // Average ratio is ~4 chars per token for English text
+    USING_ESTIMATION_MODE = true;  // SET FLAG
+    const estimate = Math.floor(textLen / 4) + padding;
+    debug(`[TOKENIZER] Large input (${textLen} chars), using estimate: ${estimate} tokens`);
+    return estimate;
 }
 
 // Connection profile helpers removed — summarization now uses an independent OpenAI-compatible endpoint (ct_summary_endpoint_url)
@@ -1575,34 +1584,6 @@ function update_status_display() {
     debug(`  $display found: ${$display.length > 0}`);
     debug(`  $text found: ${$text.length > 0}`);
     
-    // V33 DIAGNOSTIC: Comprehensive tokenizer debug logging
-    const ctx = getContext();
-    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ═══ TOKENIZER STATE CHECK ═══`);
-    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx exists: ${!!ctx}`);
-    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx.getTokenCount exists: ${!!(ctx && ctx.getTokenCount)}`);
-    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx.getTokenCount type: ${ctx ? typeof ctx.getTokenCount : 'N/A'}`);
-    
-    // Test tokenizer with known inputs
-    if (ctx && ctx.getTokenCount) {
-        const testInputs = [
-            { text: 'Hello world', expected: '2-3' },
-            { text: 'The quick brown fox jumps over the lazy dog', expected: '9-12' },
-            { text: last_raw_prompt ? last_raw_prompt.substring(0, 100) : 'Sample test text for tokenization', expected: 'varies' }
-        ];
-        
-        console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] Running test tokenizations:`);
-        for (const test of testInputs) {
-            const result = ctx.getTokenCount(test.text);
-            const textPreview = test.text.substring(0, 30).replace(/\n/g, '\\n');
-            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Input: "${textPreview}..." (${test.text.length} chars)`);
-            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Result: ${result} tokens (expected: ${test.expected})`);
-            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Status: ${result > 0 ? 'OK' : '⚠️ ZERO TOKENS'}`);
-        }
-    } else {
-        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ⚠️ ctx.getTokenCount is not available!`);
-    }
-    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ═══════════════════════════════`);
-    
     // Get the last prompt size
     const last_raw_prompt = get_last_prompt_raw();
     debug(`  last_raw_prompt exists: ${!!last_raw_prompt}`);
@@ -1612,10 +1593,24 @@ function update_status_display() {
         return;
     }
     
-    const actualSize = count_tokens(last_raw_prompt);
+    let actualSize = count_tokens(last_raw_prompt);
     const targetSize = get_settings('target_context_size');
+    
+    // Safety: If tokenizer returned 0, try segment-based calculation
+    if (actualSize === 0 && last_raw_prompt && last_raw_prompt.length > 0) {
+        const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+        if (segments && segments.length > 0) {
+            actualSize = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
+            debug(`[TOKENIZER] Used segment sum: ${actualSize} tokens from ${segments.length} segments`);
+        } else {
+            // Ultimate fallback: character-based estimate
+            actualSize = Math.floor(last_raw_prompt.length / 4);
+            debug(`[TOKENIZER] Used char estimate: ${actualSize} tokens`);
+        }
+    }
+    
     const difference = actualSize - targetSize;
-    const percentError = Math.abs((difference / targetSize) * 100);
+    const percentError = targetSize > 0 ? Math.abs((difference / targetSize) * 100) : 0;
     
     // Calculate and apply adaptive correction factor
     if (LAST_PREDICTED_SIZE > 0 && LAST_PREDICTED_CHAT_SIZE > 0) {
@@ -2122,6 +2117,16 @@ function update_overview_tab() {
     }
 
     const maxContext = getMaxContextSize();
+
+    // Update estimation mode warning banner
+    const $warning = $('#ct_estimation_warning');
+    if ($warning.length > 0) {
+        if (USING_ESTIMATION_MODE) {
+            $warning.show();
+        } else {
+            $warning.hide();
+        }
+    }
 
     // Declare actualSize at function scope with default
     let actualSize = 0;

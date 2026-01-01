@@ -28,6 +28,13 @@
                 <!-- Context Utilization Gauge -->
                 <div class="ct_overview_section">
                     <h4><i class="fa-solid fa-gauge-high"></i> Context Utilization</h4>
+                    
+                    <!-- Estimation Mode Warning Banner -->
+                    <div id="ct_estimation_warning" class="ct_estimation_warning" style="display: none;">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span>⚠️ Large Chat Mode: Token counts are ESTIMATED (~4 chars/token). Calibration accuracy reduced. Consider trimming chat history.</span>
+                    </div>
+                    
                     <div class="ct_gauge_container">
                         <div class="ct_gauge_bar">
                             <div id="ct_gauge_fill" class="ct_gauge_fill ct_gauge_green" style="width: 0%"></div>
