@@ -1065,11 +1065,10 @@ function calculate_truncation_index() {
                 continue;
             }
             
-            // Excluded message - use summary if available
-            const summary = get_memory(message);
-            if (summary && check_message_exclusion(message)) {
-                total += count_tokens(summary) + sepSize;
-            }
+            // V33 FIX: Do NOT add summary tokens for lagging messages!
+            // Summaries are injected via setExtensionPrompt() and counted in nonChatBudget.
+            // Adding them here caused double-counting and ~35% over-estimation.
+            // Lagging messages simply don't contribute to chat token count.
         }
         return total;
     }
@@ -1093,11 +1092,7 @@ function calculate_truncation_index() {
                 continue;
             }
             
-            // Excluded message - use summary if available
-            const summary = get_memory(message);
-            if (summary && check_message_exclusion(message)) {
-                total += count_tokens(summary) + sepSize;
-            }
+            // V33 FIX: Same as estimateChatSize() - no summary tokens for lagging messages
         }
         return total;
     }
