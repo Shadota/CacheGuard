@@ -372,12 +372,12 @@
                     </label>
                     <input id="ct_summary_endpoint_url" class="text_pole" type="text" placeholder="https://example.com/v1/chat/completions" />
                     <input id="ct_summary_endpoint_api_key" class="text_pole" type="password" placeholder="Optional: Bearer API key" />
-                    <div style="margin-top:8px; display:flex; align-items:center; gap:8px;">
+                    <div class="ct_button_row">
                         <button id="ct_summary_endpoint_test" class="menu_button" title="Test summary endpoint">
                             <i class="fa-solid fa-vial"></i> Test Summary Endpoint
                         </button>
-                        <span id="ct_summary_endpoint_status" class="ct_status_message" style="margin-left:6px;"></span>
                     </div>
+                    <div id="ct_summary_endpoint_status" class="ct_status_message" style="margin-top: 8px;"></div>
                 </div>
 
                 <!-- New summarization request controls: timeout, delay, retries -->

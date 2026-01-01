@@ -1902,6 +1902,18 @@ function update_overview_tab() {
         $('#ct_gauge_fill').css('width', '0%');
         $('#ct_gauge_value').text('0.0%');
         $('#ct_gauge_max').text('Waiting for first generation...');
+        
+        // REQ-002 FIX: Update Cal. Progress even without prompt data
+        if (get_settings('auto_calibrate_target')) {
+            $('#ct_ov_cal_phase').text('Waiting')
+                .removeClass('ct_phase_waiting ct_phase_training ct_phase_calibrating ct_phase_retraining ct_phase_stable')
+                .addClass('ct_phase_waiting');
+            $('#ct_ov_cal_progress').text('0/2');
+        } else {
+            $('#ct_ov_cal_phase').text('Disabled')
+                .removeClass('ct_phase_waiting ct_phase_training ct_phase_calibrating ct_phase_retraining ct_phase_stable');
+            $('#ct_ov_cal_progress').text('--');
+        }
         return;
     }
 
@@ -4701,29 +4713,25 @@ function stop_indexing() {
 function update_indexing_button_state(state) {
     const $button = $('#ct_index_chats');
     
-    // Support legacy boolean for backward compatibility
-    if (typeof state === 'boolean') {
-        state = state ? 'active' : 'inactive';
-    }
-    
     if (state === 'active') {
-        $button.addClass('ct_active');
-        $button.find('i').removeClass('fa-database').addClass('fa-stop');
+        $button.addClass('ct_active').removeClass('ct_stopping').prop('disabled', false);
+        $button.find('i').removeClass('fa-database fa-spinner fa-spin').addClass('fa-stop');
         $button.find('span').text('Stop');
-        $button.attr('title', 'Stop the current indexing operation');
+        $button.removeAttr('title');
+        $button.off('mouseenter.ct_title');
     } else if (state === 'stopping') {
-        $button.addClass('ct_active');
+        $button.addClass('ct_stopping').removeClass('ct_active').prop('disabled', true);
         $button.find('i').removeClass('fa-database fa-stop').addClass('fa-spinner fa-spin');
         $button.find('span').text('Stopping...');
-        $button.attr('title', 'Aborting indexing operations...');
-        $button.prop('disabled', true);
+        $button.removeAttr('title');
     } else {
-        // inactive state
-        $button.removeClass('ct_active');
+        // inactive
+        $button.removeClass('ct_active ct_stopping').prop('disabled', false);
         $button.find('i').removeClass('fa-stop fa-spinner fa-spin').addClass('fa-database');
         $button.find('span').text('Index Chat');
-        $button.attr('title', 'Index all messages from current chat');
-        $button.prop('disabled', false);
+        $button.off('mouseenter.ct_title').one('mouseenter.ct_title', function() {
+            $(this).attr('title', 'Index all messages from current chat');
+        });
     }
 }
 
@@ -5079,6 +5087,46 @@ async function process_and_store_chunk(chunk, signal = null) {
         
         // Ensure collection exists (with payload indexes)
         await ensure_collection_exists();
+        
+        // REQ-005 FIX: Check for duplicate chunk before storing
+        if (chunk.messageHashes && chunk.messageHashes.some(h => h !== null)) {
+            const url = get_settings('qdrant_url');
+            const collection = get_current_collection_name();
+            const ctx = getContext();
+            const hashKey = chunk.messageHashes.join(',');
+            
+            try {
+                const scrollResponse = await fetch(`${url}/collections/${collection}/points/scroll`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filter: {
+                            must: [
+                                { key: 'chat_id', match: { value: ctx.chatId } },
+                                { key: 'is_chunk', match: { value: true } }
+                            ]
+                        },
+                        limit: 100,
+                        with_payload: true
+                    })
+                });
+                
+                if (scrollResponse.ok) {
+                    const data = await scrollResponse.json();
+                    const existingChunks = data.result?.points || [];
+                    
+                    for (const existing of existingChunks) {
+                        const existingHashKey = (existing.payload?.message_hashes || []).join(',');
+                        if (existingHashKey === hashKey) {
+                            debug_qdrant(`Skipping duplicate chunk with same message_hashes: ${hashKey}`);
+                            return; // Don't store duplicate
+                        }
+                    }
+                }
+            } catch (e) {
+                debug_qdrant(`Deduplication check failed, proceeding with storage: ${e.message}`);
+            }
+        }
         
         // Create point for Qdrant with V10 enhanced payload
         const point = {
@@ -5716,6 +5764,11 @@ function buffer_message(index, text, isUser) {
 
 // Buffer a message for chunked vectorization (V10)
 function buffer_message_for_chunking(index, text, isUser, message) {
+    // REQ-005 FIX: Ensure message hash is computed for deduplication
+    if (message && message.mes && !get_data(message, 'hash')) {
+        set_data(message, 'hash', getStringHash(message.mes));
+    }
+    
     // Check vectorization delay
     const ctx = getContext();
     const delay = get_settings('vectorization_delay');
@@ -6249,12 +6302,13 @@ async function handle_qdrant_message_deleted() {
         const reQueueIndexes = await delete_chunks_containing_indexes(url, collection, deletedIndexes);
         
         // Re-queue surviving messages from deleted chunks for re-vectorization
+        // REQ-004 FIX: Re-queue affected messages for vectorization
         if (reQueueIndexes.length > 0) {
             debug_qdrant(`Re-queuing ${reQueueIndexes.length} messages for vectorization`);
             for (const idx of reQueueIndexes) {
                 if (chat[idx] && !chat[idx].is_system) {
                     const msg = chat[idx];
-                    buffer_message(idx, msg.mes, msg.is_user);
+                    buffer_message_for_chunking(idx, msg.mes, msg.is_user, msg);
                 }
             }
         }
@@ -6368,8 +6422,6 @@ async function index_current_chat() {
     
     update_indexing_button_state(true);
     
-    toastr.info('Indexing current chat...', MODULE_NAME_FANCY);
-    
     let indexed = 0;
     let chunks = [];
     
@@ -6447,12 +6499,7 @@ async function index_current_chat() {
     
     update_indexing_button_state(false);
     
-    if (wasStopped) {
-        toastr.info(`Indexing stopped: ${indexed} messages indexed into ${stored} chunks`, MODULE_NAME_FANCY);
-    } else {
-        toastr.success(`Indexed ${indexed} messages into ${stored} chunks`, MODULE_NAME_FANCY);
-    }
-    debug_qdrant(`Indexed ${indexed} messages into ${stored} chunks`);
+    debug_qdrant(`Indexed ${indexed} messages into ${stored} chunks (${wasStopped ? 'stopped' : 'completed'})`);
 }
 
 // ==================== MEMORY RETRIEVAL AND INJECTION ====================
