@@ -327,7 +327,21 @@ function set_settings(key, value) {
 // Token counting
 function count_tokens(text, padding = 0) {
     const ctx = getContext();
-    return ctx.getTokenCount(text, padding);
+    const result = ctx.getTokenCount(text, padding);
+    
+    // DIAGNOSTIC: Log every tokenizer call with context
+    const textPreview = text ? text.substring(0, 50).replace(/\n/g, '\\n') : '<null>';
+    const textLen = text ? text.length : 0;
+    debug(`[TOKENIZER] Input: ${textLen} chars, Result: ${result}, Preview: "${textPreview}..."`);
+    
+    // DIAGNOSTIC: Log tokenizer state
+    if (result === 0 && textLen > 0) {
+        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ⚠️ Returned 0 for ${textLen} char input!`);
+        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ctx.getTokenCount type: ${typeof ctx.getTokenCount}`);
+        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER] ctx available methods:`, Object.keys(ctx).filter(k => typeof ctx[k] === 'function').join(', '));
+    }
+    
+    return result;
 }
 
 // Connection profile helpers removed — summarization now uses an independent OpenAI-compatible endpoint (ct_summary_endpoint_url)
@@ -1560,6 +1574,34 @@ function update_status_display() {
     
     debug(`  $display found: ${$display.length > 0}`);
     debug(`  $text found: ${$text.length > 0}`);
+    
+    // V33 DIAGNOSTIC: Comprehensive tokenizer debug logging
+    const ctx = getContext();
+    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ═══ TOKENIZER STATE CHECK ═══`);
+    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx exists: ${!!ctx}`);
+    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx.getTokenCount exists: ${!!(ctx && ctx.getTokenCount)}`);
+    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ctx.getTokenCount type: ${ctx ? typeof ctx.getTokenCount : 'N/A'}`);
+    
+    // Test tokenizer with known inputs
+    if (ctx && ctx.getTokenCount) {
+        const testInputs = [
+            { text: 'Hello world', expected: '2-3' },
+            { text: 'The quick brown fox jumps over the lazy dog', expected: '9-12' },
+            { text: last_raw_prompt ? last_raw_prompt.substring(0, 100) : 'Sample test text for tokenization', expected: 'varies' }
+        ];
+        
+        console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] Running test tokenizations:`);
+        for (const test of testInputs) {
+            const result = ctx.getTokenCount(test.text);
+            const textPreview = test.text.substring(0, 30).replace(/\n/g, '\\n');
+            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Input: "${textPreview}..." (${test.text.length} chars)`);
+            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Result: ${result} tokens (expected: ${test.expected})`);
+            console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG]   Status: ${result > 0 ? 'OK' : '⚠️ ZERO TOKENS'}`);
+        }
+    } else {
+        console.warn(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ⚠️ ctx.getTokenCount is not available!`);
+    }
+    console.log(`[${MODULE_NAME_FANCY}][TOKENIZER-DEBUG] ═══════════════════════════════`);
     
     // Get the last prompt size
     const last_raw_prompt = get_last_prompt_raw();
