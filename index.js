@@ -133,6 +133,7 @@ Recent chat always takes precedence over these notes.
     
     // Per-message vectorization settings
     vectorization_delay: 2,           // Don't vectorize messages within N positions from end
+    summarization_delay: 10,          // Don't summarize messages within N positions from end
     delete_on_message_delete: true,   // Delete Qdrant entries when messages are deleted
     auto_dedupe: true,                // Automatically remove duplicate entries during search
     
@@ -2363,13 +2364,13 @@ function update_overview_memories() {
     const $count = $('#ct_ov_memory_count');
     const $list = $('#ct_ov_memory_list');
     
-    if (!get_settings('qdrant_enabled') || CURRENT_QDRANT_MEMORIES.length === 0) {
+    if (!get_settings('qdrant_enabled') || INJECTED_QDRANT_MEMORIES.length === 0) {
         $count.text('Retrieved Memories (0)');
         $list.html('<div class="ct_memory_empty">Generate a message to retrieve memories</div>');
         return;
     }
-    
-    const memories = CURRENT_QDRANT_MEMORIES;
+
+    const memories = INJECTED_QDRANT_MEMORIES;
     $count.text(`Retrieved Memories (${memories.length})`);
     
     // Build memory list HTML (reuse from update_memory_display)
@@ -2821,13 +2822,13 @@ function update_memory_display() {
     const $count = $('#ct_memory_count');
     const $list = $('#ct_memory_list');
     
-    if (!get_settings('qdrant_enabled') || CURRENT_QDRANT_MEMORIES.length === 0) {
+    if (!get_settings('qdrant_enabled') || INJECTED_QDRANT_MEMORIES.length === 0) {
         $count.text('No memories retrieved');
         $list.html('<div class="ct_memory_empty">Generate a message to retrieve memories</div>');
         return;
     }
-    
-    const memories = CURRENT_QDRANT_MEMORIES;
+
+    const memories = INJECTED_QDRANT_MEMORIES;
     $count.text(`${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} retrieved`);
     
     // Build memory list HTML
@@ -3508,9 +3509,16 @@ async function auto_summarize_chat() {
     
     debug('Auto-summarizing chat...');
     
-    // Find messages that need summaries
+    // Find messages that need summaries (respecting delay window)
     const to_summarize = [];
+    const summarization_delay = get_settings('summarization_delay');
+    const delay_threshold = chat.length - summarization_delay;
+
     for (let i = 0; i < chat.length; i++) {
+        // Skip messages within delay window
+        if (i >= delay_threshold) {
+            continue;
+        }
         if (get_data(chat[i], 'needs_summary')) {
             to_summarize.push(i);
         }
@@ -3742,6 +3750,9 @@ function initialize_ui_listeners() {
     
     // Min messages (now a slider)
     bind_range_setting('#ct_min_keep', 'min_messages_to_keep', '#ct_min_keep_display');
+
+    // Summarization delay (new slider)
+    bind_range_setting('#ct_summarization_delay', 'summarization_delay', '#ct_summarization_delay_display');
     
     // Max words per summary (now a slider)
     bind_range_setting('#ct_max_words', 'summary_max_words', '#ct_max_words_display');
@@ -6290,6 +6301,7 @@ ${formattedMemories}
 // Global variable to store retrieved memories for current generation
 let CURRENT_QDRANT_MEMORIES = [];
 let CURRENT_QDRANT_INJECTION = '';
+let INJECTED_QDRANT_MEMORIES = [];  // Memories that were actually injected (for display)
 
 // Refresh Qdrant memories (called before generation)
 async function refresh_qdrant_memories() {
@@ -6302,6 +6314,9 @@ async function refresh_qdrant_memories() {
     try {
         CURRENT_QDRANT_MEMORIES = await retrieve_relevant_memories();
         CURRENT_QDRANT_INJECTION = format_memories_for_injection(CURRENT_QDRANT_MEMORIES);
+
+        // Store a copy for display (so UI shows what was actually injected, not post-refresh results)
+        INJECTED_QDRANT_MEMORIES = [...CURRENT_QDRANT_MEMORIES];
         
         // Inject memories into context
         const ctx = getContext();

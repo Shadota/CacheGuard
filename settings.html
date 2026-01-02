@@ -595,6 +595,22 @@
                         <input id="ct_min_keep" class="ct_compact_slider" type="range" min="1" max="100" step="1" value="10" />
                     </div>
 
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Summarization Delay
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Don't summarize messages within N positions from end. Allows natural summarization over time while roleplaying.</span>
+                                </span>
+                            </span>
+                            <span id="ct_summarization_delay_display" class="ct_setting_value">10</span>
+                        </div>
+                        <div class="ct_slider_wrapper">
+                            <input id="ct_summarization_delay" type="range" min="0" max="50" step="1" value="10" />
+                        </div>
+                    </div>
+
                     <div class="ct_compact_checkbox">
                         <input id="ct_debug_truncation" type="checkbox" />
                         <label for="ct_debug_truncation">Debug Mode</label>
