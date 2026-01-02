@@ -5645,7 +5645,7 @@ async function update_vector_stats_display() {
     }
 
     // Update buffer state
-    const bufferCount = chunkBuffer.getState().messageCount;
+    const bufferCount = messageBuffer.length;
     $('#ct_ov_vector_buffer').text(`${bufferCount} msgs`);
 
     // Update advanced stats
@@ -5964,48 +5964,138 @@ async function delete_chunks_containing_indexes(url, collection, deletedIndexes)
     return reQueueIndexes;
 }
 
-// Index entire current chat
+// Index entire current chat (matches Summarize All pattern exactly)
 async function index_current_chat() {
-    // If already active, stop (toggle behavior)
+    // If already active, stop (toggle behavior - matches Summarize All)
     if (INDEXING_ACTIVE) {
         stop_indexing();
         return;
     }
-    
+
     const ctx = getContext();
     const chat = ctx.chat;
-    
+
     if (!get_settings('qdrant_enabled')) {
         toastr.error('Qdrant is not enabled', MODULE_NAME_FANCY);
         return;
     }
-    
+
+    if (!chat || chat.length === 0) {
+        toastr.info('No messages to index', MODULE_NAME_FANCY);
+        return;
+    }
+
     // Set indexing state
     INDEXING_ACTIVE = true;
     INDEXING_STOPPED = false;
-    
+    INDEXING_ABORT_CONTROLLER = new AbortController();
+
     update_indexing_button_state('active');
-    
-    debug_qdrant('Starting chat indexing - processing message buffer');
-    
-    // Simply process the current message buffer
-    // The buffer will be flushed and saved as a chunk
+
+    debug_qdrant(`Starting chat indexing - ${chat.length} messages`);
+
+    let processed = 0;
+    let skipped = 0;
+
     try {
-        await processMessageBuffer();
-        
-        const wasStopped = INDEXING_STOPPED;
-        debug_qdrant(`Indexing ${wasStopped ? 'stopped' : 'completed'}`);
-        
-        if (!wasStopped) {
-            toastr.success('Chat indexed successfully', MODULE_NAME_FANCY);
+        // Clear existing buffer to start fresh
+        messageBuffer = [];
+
+        // Iterate through ALL messages (like Summarize All)
+        for (let i = 0; i < chat.length; i++) {
+            // Check if stopped
+            if (INDEXING_STOPPED) {
+                debug_qdrant(`Indexing stopped at message ${i}`);
+                break;
+            }
+
+            const message = chat[i];
+
+            // Skip system messages
+            if (message.is_system) {
+                continue;
+            }
+
+            // Skip already vectorized/chunked messages
+            if (get_data(message, 'vectorized') || get_data(message, 'chunked')) {
+                skipped++;
+                continue;
+            }
+
+            // Check message type settings
+            if (message.is_user && !get_settings('save_user_messages')) {
+                continue;
+            }
+            if (!message.is_user && !get_settings('save_char_messages')) {
+                continue;
+            }
+
+            // Add to buffer
+            const messageId = `${ctx.name2}_${Date.now()}_${i}`;
+            messageBuffer.push({
+                text: message.mes,
+                characterName: ctx.name2 || 'Character',
+                isUser: message.is_user,
+                messageId: messageId,
+                index: i
+            });
+
+            processed++;
+
+            // Check buffer size and process if needed
+            let bufferSize = 0;
+            messageBuffer.forEach((msg) => {
+                bufferSize += msg.text.length + (msg.characterName?.length || 0) + 4;
+            });
+
+            const maxSize = get_settings('chunk_max_size') || 1500;
+            if (bufferSize >= maxSize) {
+                try {
+                    await processMessageBuffer();
+                    // Mark processed messages as chunked
+                    for (const bufferedMsg of messageBuffer) {
+                        if (chat[bufferedMsg.index]) {
+                            set_data(chat[bufferedMsg.index], 'chunked', true);
+                        }
+                    }
+                } catch (e) {
+                    debug_qdrant(`Failed to process chunk: ${e.message}`);
+                }
+            }
         }
+
+        // Process any remaining buffer
+        if (messageBuffer.length > 0 && !INDEXING_STOPPED) {
+            try {
+                await processMessageBuffer();
+            } catch (e) {
+                debug_qdrant(`Failed to process final chunk: ${e.message}`);
+            }
+        }
+
+        const wasStopped = INDEXING_STOPPED;
+        debug_qdrant(`Indexing ${wasStopped ? 'stopped' : 'completed'}: ${processed} processed, ${skipped} skipped`);
+
+        if (wasStopped) {
+            toastr.warning('Indexing stopped', MODULE_NAME_FANCY);
+        } else if (processed === 0 && skipped > 0) {
+            toastr.info('All messages already indexed', MODULE_NAME_FANCY);
+        } else if (processed > 0) {
+            toastr.success(`Indexed ${processed} messages`, MODULE_NAME_FANCY);
+        } else {
+            toastr.info('No messages to index', MODULE_NAME_FANCY);
+        }
+
     } catch (e) {
         error('Failed to index chat:', e);
+        toastr.error(`Indexing failed: ${e.message}`, MODULE_NAME_FANCY);
     } finally {
         // Reset indexing state
         INDEXING_ACTIVE = false;
         INDEXING_STOPPED = false;
-        
+        INDEXING_ABORT_CONTROLLER = null;
+        messageBuffer = [];  // Clear buffer
+
         update_indexing_button_state('inactive');
     }
 }

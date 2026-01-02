@@ -694,76 +694,6 @@
 
                 <hr class="ct_section_divider">
 
-                <!-- Chunk Settings -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-layer-group"></i>
-                    <span>Chunk Settings</span>
-                </div>
-
-                <div class="ct_compact_setting">
-                    <div class="ct_setting_header">
-                        <span class="ct_setting_label">
-                            Chunk Min Size
-                            <span class="ct_tooltip">
-                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                <span class="ct_tooltip_text">Minimum characters before flushing chunk to Qdrant</span>
-                            </span>
-                        </span>
-                        <span id="ct_chunk_min_display" class="ct_setting_value">1200 chars</span>
-                    </div>
-                    <input id="ct_chunk_min_size" class="ct_compact_slider" type="range" min="500" max="2000" step="100" value="1200" />
-                </div>
-
-                <div class="ct_compact_setting">
-                    <div class="ct_setting_header">
-                        <span class="ct_setting_label">
-                            Chunk Max Size
-                            <span class="ct_tooltip">
-                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                <span class="ct_tooltip_text">Maximum characters before forcing chunk flush</span>
-                            </span>
-                        </span>
-                        <span id="ct_chunk_max_display" class="ct_setting_value">1500 chars</span>
-                    </div>
-                    <input id="ct_chunk_max_size" class="ct_compact_slider" type="range" min="1000" max="3000" step="100" value="1500" />
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_account_qdrant_tokens" type="checkbox" checked />
-                    <label for="ct_account_qdrant_tokens">Account for Qdrant Tokens in Context Budget</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Subtract Qdrant injection tokens from target context size</span>
-                    </span>
-                </div>
-
-                <hr class="ct_section_divider">
-
-                <!-- Auto-Save Settings -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-floppy-disk"></i>
-                    <span>Auto-Save</span>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_auto_save_memories" type="checkbox" checked />
-                    <label for="ct_auto_save_memories">Auto-Save Memories</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Automatically save messages to Qdrant as conversations happen.</span>
-                    </span>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_save_user_messages" type="checkbox" checked />
-                    <label for="ct_save_user_messages">Save User Messages</label>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_save_char_messages" type="checkbox" checked />
-                    <label for="ct_save_char_messages">Save Character Messages</label>
-                </div>
-
                 <hr class="ct_section_divider">
 
                 <!-- Quick Actions -->
@@ -785,7 +715,75 @@
                     <i class="fa-solid fa-chevron-down"></i>
                 </div>
                 <div class="ct_advanced_content" id="ct_qdrant_advanced_content" style="display: none;">
-                    
+
+                    <!-- Chunk Settings (moved from top-level) -->
+                    <div class="ct_section_header" style="margin-top: 0;">
+                        <i class="fa-solid fa-layer-group"></i>
+                        <span>Chunk Settings</span>
+                    </div>
+
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Chunk Min Size
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Minimum characters before flushing chunk to Qdrant</span>
+                                </span>
+                            </span>
+                            <span id="ct_chunk_min_display" class="ct_setting_value">1200 chars</span>
+                        </div>
+                        <input id="ct_chunk_min_size" class="ct_compact_slider" type="range" min="500" max="2000" step="100" value="1200" />
+                    </div>
+
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Chunk Max Size
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Maximum characters before forcing chunk flush</span>
+                                </span>
+                            </span>
+                            <span id="ct_chunk_max_display" class="ct_setting_value">1500 chars</span>
+                        </div>
+                        <input id="ct_chunk_max_size" class="ct_compact_slider" type="range" min="1000" max="3000" step="100" value="1500" />
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_account_qdrant_tokens" type="checkbox" checked />
+                        <label for="ct_account_qdrant_tokens">Account for Qdrant Tokens</label>
+                        <span class="ct_tooltip ct_tooltip_right">
+                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                            <span class="ct_tooltip_text">Subtract Qdrant injection tokens from target context size</span>
+                        </span>
+                    </div>
+
+                    <!-- Auto-Save Settings (moved from top-level) -->
+                    <div class="ct_section_header">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>Auto-Save</span>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_auto_save_memories" type="checkbox" checked />
+                        <label for="ct_auto_save_memories">Auto-Save Memories</label>
+                        <span class="ct_tooltip ct_tooltip_right">
+                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                            <span class="ct_tooltip_text">Automatically save messages to Qdrant as conversations happen.</span>
+                        </span>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_save_user_messages" type="checkbox" checked />
+                        <label for="ct_save_user_messages">Save User Messages</label>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_save_char_messages" type="checkbox" checked />
+                        <label for="ct_save_char_messages">Save Character Messages</label>
+                    </div>
+
                     <!-- Memory Retrieval Settings -->
                     <div class="ct_section_header" style="margin-top: 0;">
                         <i class="fa-solid fa-search"></i>
