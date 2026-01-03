@@ -43,7 +43,7 @@ const default_settings = {
     min_messages_to_keep: 10,       // Safety limit
     
     // Auto-calibration settings
-    auto_calibrate_target: false,   // Enable auto-calibration
+    auto_calibrate_target: true,   // Enable auto-calibration
     target_utilization: 0.80,       // Target 80% of max context
     calibration_tolerance: 0.05,    // 5% tolerance before recalibrating
     
@@ -52,7 +52,7 @@ const default_settings = {
     max_summary_injection_tokens: 10000,  // Manual override when auto_limit_summaries is false (0 = unlimited)
     
     // Summarization settings
-    auto_summarize: true,
+    auto_summarize: false,
     connection_profile: "",         // DEPRECATED: Connection profile dropdown removed — summarization uses independent summary_endpoint_url
     summary_endpoint_url: "",       // REQ-003: OpenAI-compatible summary endpoint URL (empty = use generateRaw)
     summary_max_words: 50,          // Maximum words per summary

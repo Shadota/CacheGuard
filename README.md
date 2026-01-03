@@ -4,7 +4,7 @@
 
 ## The Problem
 
-Large language models have limited context windows. In long roleplay sessions, older messages get silently dropped, causing characters to "forget" important events, relationships, and plot points. This breaks immersion and forces constant manual recaps.
+When your context window fills up, every new message forces the LLM provider to remove old messages from the start of the conversation. This causes **prompt cache invalidation** - the cached prefix becomes invalid, and your fast generations suddenly become slow. Permanently. You go from quick responses to long waits in an instant, and it never recovers because every message shifts the context again.
 
 ## The Solution
 
@@ -42,9 +42,9 @@ CacheGuard automatically:
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Target Size | Token limit before truncation kicks in | 8000 |
-| Auto-Calibrate | Automatically tune target based on actual usage | Off |
+| Auto-Calibrate | Automatically tune target based on actual usage | On |
 | Target Utilization | Percentage of max context to use | 80% |
-| Auto-Summarize | Generate summaries for truncated messages | On |
+| Auto-Summarize | Generate summaries for truncated messages | Off |
 | Qdrant Memory | Enable vector-based memory retrieval | Off |
 
 ## Credits & Acknowledgments
