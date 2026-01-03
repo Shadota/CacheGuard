@@ -23,13 +23,6 @@ CacheGuard automatically:
 ⚙️ **Auto-Calibration** - Self-tuning algorithm learns your optimal context size over a few generations  
 🔌 **LoreVault Compatible** - Automatically tracks LoreVault memory tokens in the context breakdown
 
-## Installation
-
-1. Download or clone this repository
-2. Place the folder in your SillyTavern `data/default-user/extensions/` directory
-3. Restart SillyTavern
-4. Enable "CacheGuard" in Extensions
-
 ## Quick Start
 
 1. **Enable Context Truncator** in the Truncation tab
