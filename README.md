@@ -25,9 +25,10 @@ CacheGuard automatically:
 
 ## Quick Start
 
-1. **Enable Context Truncator** in the Truncation tab
-3. Optionally configure **Auto-Summarize** with an OpenAI-compatible endpoint
-4. For vector memory, configure **Qdrant** connection in the Qdrant Memory tab
+1. By default, everything is enabled to work out-of-the-box!
+2. Optionally configure **Auto-Summarize** with an OpenAI-compatible endpoint to allow for summarizations to happen, instead of truncated messages to be dropped completely.
+3. For vector memory, configure **Qdrant** connection in the Qdrant Memory tab.
+4. LoreVault simply has to be enabled in it's own extensions' settings.
 
 ## Configuration Overview
 
