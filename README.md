@@ -1,6 +1,6 @@
 # CacheGuard - Smart Context Management for SillyTavern
 
-**Never lose your story's continuity again.** CacheGuard intelligently manages your context window by summarizing old messages and retrieving relevant memories exactly when you need them.
+**Made with long-form roleplays in mind!** CacheGuard intelligently manages your context window to make sure your extended roleplays will remain usable with minimal performance impact!
 
 ## The Problem
 
@@ -22,13 +22,6 @@ CacheGuard automatically:
 📊 **Visual Dashboard** - Real-time context utilization gauge and breakdown by category  
 ⚙️ **Auto-Calibration** - Self-tuning algorithm learns your optimal context size over a few generations  
 🔌 **LoreVault Compatible** - Automatically tracks LoreVault memory tokens in the context breakdown
-
-## Installation
-
-1. Download or clone this repository
-2. Place the folder in your SillyTavern `data/default-user/extensions/` directory
-3. Restart SillyTavern
-4. Enable "CacheGuard" in Extensions
 
 ## Quick Start
 
