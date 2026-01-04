@@ -17,6 +17,7 @@ import {
     extension_prompt_roles,
     extension_prompt_types,
     chat_metadata,
+    generateRaw,
 } from '../../../../script.js';
 
 import { 
@@ -31,7 +32,7 @@ export { MODULE_NAME };
 
 // Module constants
 const MODULE_NAME = 'context_truncator';
-const MODULE_NAME_FANCY = 'Enhanced Memory';
+const MODULE_NAME_FANCY = 'CacheGuard';
 
 // Default settings
 const default_settings = {
@@ -42,31 +43,43 @@ const default_settings = {
     min_messages_to_keep: 10,       // Safety limit
     
     // Auto-calibration settings
-    auto_calibrate_target: false,   // Enable auto-calibration
+    auto_calibrate_target: true,   // Enable auto-calibration
     target_utilization: 0.80,       // Target 80% of max context
     calibration_tolerance: 0.05,    // 5% tolerance before recalibrating
     
+    // Summary injection limits (V22)
+    auto_limit_summaries: true,     // Auto-calculate max summary tokens (20% of target budget)
+    max_summary_injection_tokens: 10000,  // Manual override when auto_limit_summaries is false (0 = unlimited)
+    
     // Summarization settings
-    auto_summarize: true,
-    connection_profile: "",         // Connection profile for summarization (empty = same as current)
+    auto_summarize: false,
+    connection_profile: "",         // DEPRECATED: Connection profile dropdown removed — summarization uses independent summary_endpoint_url
+    summary_endpoint_url: "",       // REQ-003: OpenAI-compatible summary endpoint URL (empty = use generateRaw)
     summary_max_words: 50,          // Maximum words per summary
+    summary_endpoint_timeout: 15000,  // Timeout in ms (increased from 10s)
+    summary_request_delay: 500,       // Delay between requests in ms
+    summary_max_retries: 3,           // Max retry attempts on transient errors
+    summary_max_tokens: 800,          // Max tokens for summary generation (increased for GLM-4 compatibility)
     summary_prompt: `Summarize the following roleplay message into a single, dense sentence.
 
 NAMES: {{user}} is the user's character. {{char}} is the AI character.
 
 RULES:
-• Output ONE sentence in past tense, max {{words}} words
+• Output ONLY the summary - nothing else
+• ONE sentence in past tense, max {{words}} words
 • Start with speaker label: "{{char}}:", "{{user}}:", or "Narrator:"
 • Focus on: actions, decisions, emotions, key plot/worldbuilding details
 • Never add information not in the original message
-• Never include meta-commentary, tags, or template text
+• Never include reasoning, explanations, or meta-commentary
+• Never use tags like <think>, </think>, or similar
+• Stop immediately after the summary sentence
 
 EXAMPLES:
 • "{{char}}: Accepted the apology but remained emotionally guarded."
 • "{{user}}: Proposed exploring the abandoned fortress despite the warnings."
 • "Narrator: Described the rain-soaked streets of the Scab district."
 
-MESSAGE TO SUMMARIZE:
+{{context_block}}MESSAGE TO SUMMARIZE:
 {{message}}
 
 SUMMARY:`,
@@ -113,24 +126,28 @@ Recent chat always takes precedence over these notes.
     save_char_messages: true,
     per_chat_collection: true,
     
-    // Chunking settings (DEPRECATED - kept for backwards compatibility)
+    // ==================== SIMPLE CHUNK SETTINGS ====================
     chunk_min_size: 1200,
     chunk_max_size: 1500,
     chunk_timeout: 30000,
     
-    // Per-message vectorization settings (NEW - replaces chunking)
+    // Per-message vectorization settings
     vectorization_delay: 2,           // Don't vectorize messages within N positions from end
+    summarization_delay: 10,          // Don't summarize messages within N positions from end
     delete_on_message_delete: true,   // Delete Qdrant entries when messages are deleted
     auto_dedupe: true,                // Automatically remove duplicate entries during search
     
-    // ==================== SYNERGY SETTINGS ====================
-    use_summaries_for_qdrant: false,
-    memory_aware_summaries: false,
+    // Account for Qdrant tokens in context budget
     account_qdrant_tokens: true,
 };
+ 
+// Timeout now uses get_settings('summary_endpoint_timeout') dynamically
 
 // Global state
 let TRUNCATION_INDEX = null;  // Current truncation position
+
+// Estimation mode flag - true when char-based fallback is used instead of tokenizer
+let USING_ESTIMATION_MODE = false;
 
 // Popout state
 let POPOUT_VISIBLE = false;
@@ -138,12 +155,24 @@ let POPOUT_LOCKED = false;
 let $POPOUT = null;
 let $DRAWER_CONTENT = null;
 
+// Indexing state (for Qdrant)
+let INDEXING_ACTIVE = false;
+let INDEXING_STOPPED = false;
+let INDEXING_ABORT_CONTROLLER = null;
+
 // Calibration state machine
 // States: WAITING -> INITIAL_TRAINING -> CALIBRATING -> RETRAINING -> STABLE
 let CALIBRATION_STATE = 'WAITING';
 let GENERATION_COUNT = 0;      // Generations in current phase
 let STABLE_COUNT = 0;          // Consecutive stable generations
+let LAST_CORRECTION_FACTOR = 1.0;  // Previous factor for convergence detection
 let RETRAIN_COUNT = 0;         // Generations in retraining phase
+let LAST_STABLE_CHAT_LENGTH = 0;  // Chat length when entering STABLE state
+
+// V33: Cache last valid raw prompt for fallback during intercept
+let CACHED_RAW_PROMPT = null;
+let CACHED_RAW_PROMPT_CHAT_LENGTH = 0;
+
 const TRAINING_GENERATIONS = 2;  // Generations needed to train correction factor (reduced from 3)
 const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE state
 
@@ -151,15 +180,87 @@ const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE stat
 let QDRANT_TOKEN_HISTORY = [];  // Rolling history of Qdrant injection tokens
 const QDRANT_HISTORY_SIZE = 5;  // Number of samples to average
 
+// Summary injection tracking (V22)
+let DROPPED_SUMMARY_COUNT = 0;  // Summaries dropped due to token cap
+
+// Debug summary tracking (V33)
+let DEBUG_SEGMENT_COUNT = 0;
+let DEBUG_MAP_HITS = 0;
+let DEBUG_MAP_MISSES = 0;
+
+// Vector Statistics State (V11)
+let VECTOR_STATS = {
+    // Connection health
+    connected: false,
+    lastConnectionError: null,
+
+    // Collection stats (cached, refresh on demand)
+    collectionName: null,
+    totalPoints: 0,
+    chunkPoints: 0,
+    singlePoints: 0,
+
+    // Last retrieval stats
+    retrievedCount: 0,
+    scores: [], // Array of scores for distribution chart
+    avgScore: 0,
+    minScore: 0,
+    maxScore: 0,
+    duplicatesRemoved: 0,
+
+    // Buffer stats
+    bufferMessageCount: 0,
+
+    // Last update timestamps
+    lastCollectionCheck: 0,
+    lastRetrieval: 0
+};
+
 // Message change resilience (deletion/edit tracking)
-let DELETION_COUNT = 0;           // Number of impactful deletions since last calibration checkpoint
 let LAST_CHAT_LENGTH = 0;         // Track chat length to detect deletions
 let LAST_CHAT_HASHES = new Map(); // Map of message index -> content hash for edit detection
-const DELETION_TOLERANCE = 3;     // Max deletions before soft recalibration
+
+// V29: Pre-snapshot state for deletion detection (fixes race condition)
+let PRE_SNAPSHOT_CHAT_LENGTH = 0;
+let PRE_SNAPSHOT_CHAT_HASHES = new Map();
 
 // Utility functions
 function log(...args) {
     console.log(`[${MODULE_NAME_FANCY}]`, ...args);
+}
+
+// V13: Timestamp normalization for consistent temporal filtering
+function normalizeTimestamp(date) {
+    // Already a valid millisecond timestamp
+    if (typeof date === 'number' && date > 1000000000000) {
+        return date;
+    }
+
+    // Timestamp in seconds - convert to milliseconds
+    if (typeof date === 'number' && date > 1000000000 && date < 1000000000000) {
+        return date * 1000;
+    }
+
+    // Date object
+    if (date instanceof Date) {
+        const timestamp = date.getTime();
+        if (!isNaN(timestamp)) {
+            return timestamp;
+        }
+    }
+
+    // String date - try to parse it
+    if (typeof date === 'string' && date.trim()) {
+        const parsed = new Date(date);
+        const timestamp = parsed.getTime();
+        if (!isNaN(timestamp)) {
+            return timestamp;
+        }
+    }
+
+    // Fallback to current time
+    debug_qdrant('Could not normalize timestamp, using current time. Input:', date);
+    return Date.now();
 }
 
 // Module-specific debug functions
@@ -175,10 +276,42 @@ function debug_qdrant(...args) {
     }
 }
 
-function debug_synergy(...args) {
-    if (get_settings('debug_synergy')) {
-        console.log(`[${MODULE_NAME_FANCY}][Synergy]`, ...args);
-    }
+
+// Consolidated generation summary for simplified debug output
+function log_generation_summary(data) {
+    if (!get_settings('debug_truncation')) return;
+    
+    const {
+        chatLength = 0,
+        oldIndex = 0,
+        newIndex = 0,
+        actualTokens = 0,
+        targetTokens = 0,
+        factor = 1.0,
+        state = 'UNKNOWN',
+        stableCount = 0,
+        stableThreshold = 5,
+        segmentCount = 0,
+        mapHits = 0,
+        mapMisses = 0,
+        summaryCount = 0,
+        summaryTokens = 0,
+        droppedCount = 0,
+        estimationMode = false
+    } = data;
+    
+    const mode = estimationMode ? 'Estimation (large chat)' : 'Tokenizer';
+    const indexChange = oldIndex === newIndex ? `${newIndex} (unchanged)` : `${oldIndex}→${newIndex}`;
+    const tokenDiff = actualTokens - targetTokens;
+    const tokenStatus = tokenDiff > 0 ? `${tokenDiff} over` : `${Math.abs(tokenDiff)} under`;
+    const stateStr = state === 'STABLE' ? `${state} ✓` : `${state} (${stableCount}/${stableThreshold})`;
+    
+    console.log(`[${MODULE_NAME_FANCY}][Truncation] === Generation Summary ===`);
+    console.log(`  Mode: ${mode} | Chat: ${chatLength} msgs | Index: ${indexChange}`);
+    console.log(`  Tokens: ${actualTokens} actual → ${targetTokens} target (${tokenStatus})`);
+    console.log(`  Factor: ${factor.toFixed(3)} | State: ${stateStr}`);
+    console.log(`  Segments: ${segmentCount} matched | Map: ${mapHits} hits, ${mapMisses} misses`);
+    console.log(`  Summaries: ${summaryCount} injected (${summaryTokens} tokens) | Dropped: ${droppedCount}`);
 }
 
 // Legacy debug function - routes to truncation debug for backward compatibility
@@ -210,70 +343,33 @@ function set_settings(key, value) {
     saveSettingsDebounced();
 }
 
-// Token counting
+// Token counting with fallback for large inputs
+// SillyTavern's tokenizer returns 0 for inputs > ~200K chars
+const TOKENIZER_CHAR_LIMIT = 150000;  // Conservative limit
+
 function count_tokens(text, padding = 0) {
+    if (!text) return padding;
+    
     const ctx = getContext();
-    return ctx.getTokenCount(text, padding);
-}
-
-// Connection profile management (for independent summarization model)
-function check_connection_profiles_active() {
-    return getContext().extensionSettings?.connectionManager !== undefined;
-}
-
-function get_current_connection_profile() {
-    if (!check_connection_profiles_active()) return;
-    return getContext().extensionSettings.connectionManager.selectedProfile;
-}
-
-function get_connection_profiles() {
-    if (!check_connection_profiles_active()) return [];
-    return getContext().extensionSettings.connectionManager.profiles;
-}
-
-function get_connection_profile(id) {
-    const data = get_connection_profiles().find((p) => p.id === id);
-    return data;
-}
-
-function verify_connection_profile(id) {
-    if (!check_connection_profiles_active()) return false;
-    if (id === "") return true;  // no profile selected, always valid
-    return get_connection_profile(id) !== undefined;
-}
-
-function get_summary_connection_profile() {
-    let id = get_settings('connection_profile');
+    const textLen = text.length;
     
-    // If none selected, invalid, or connection profiles not active, use the current profile
-    if (id === "" || !verify_connection_profile(id) || !check_connection_profiles_active()) {
-        id = get_current_connection_profile();
+    // For small inputs, use tokenizer directly
+    if (textLen <= TOKENIZER_CHAR_LIMIT) {
+        const result = ctx.getTokenCount(text, padding);
+        // Clear estimation flag when tokenizer works
+        USING_ESTIMATION_MODE = false;
+        return result;
     }
     
-    return id;
+    // For large inputs, use character-based estimate
+    // Average ratio is ~4 chars per token for English text
+    USING_ESTIMATION_MODE = true;  // SET FLAG
+    const estimate = Math.floor(textLen / 4) + padding;
+    debug_trunc(`[TOKENIZER] Estimation mode: ${textLen} chars → ${estimate} tokens (4 chars/token)`);
+    return estimate;
 }
 
-async function update_connection_profile_dropdown() {
-    const $connection_select = $('#ct_connection_profile');
-    const connection_profiles = get_connection_profiles();
-    
-    $connection_select.empty();
-    $connection_select.append(`<option value="">Same as Current</option>`);
-    
-    for (let profile of connection_profiles) {
-        $connection_select.append(`<option value="${profile.id}">${profile.name}</option>`);
-    }
-    
-    const profile_id = get_settings('connection_profile');
-    if (!verify_connection_profile(profile_id)) {
-        debug(`Selected summary connection profile ID is invalid: ${profile_id}`);
-    }
-    
-    $connection_select.val(profile_id);
-    
-    // Refresh dropdown on click
-    $connection_select.off('click').on('click', () => update_connection_profile_dropdown());
-}
+// Connection profile helpers removed — summarization now uses an independent OpenAI-compatible endpoint (ct_summary_endpoint_url)
 
 // Message data management (stores summaries and flags on messages)
 function set_data(message, key, value) {
@@ -354,22 +450,36 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
         return null;
     }
     
-    // Match Llama 3 style headers: <|eot_id|><|start_header_id|>role<|end_header_id|>
-    const header_regex = /<\|eot_id\|><\|start_header_id\|>(user|assistant|system)<\|end_header_id\|>/g;
+    // Try ChatML format first: <|im_start|>role
+    const chatml_regex = /<\|im_start\|>(user|assistant|system)\n/g;
     let matches = [];
     let match;
     
-    while ((match = header_regex.exec(raw_prompt)) !== null) {
+    // Check for ChatML format
+    while ((match = chatml_regex.exec(raw_prompt)) !== null) {
         matches.push({
             index: match.index,
             role: match[1],
+            format: 'chatml'
         });
     }
     
-    debug(`  get_prompt_chat_segments_from_raw: Found ${matches.length} header matches`);
+    // If no ChatML, try Llama 3 format
+    if (matches.length === 0) {
+        const llama3_regex = /<\|eot_id\|><\|start_header_id\|>(user|assistant|system)<\|end_header_id\|>/g;
+        while ((match = llama3_regex.exec(raw_prompt)) !== null) {
+            matches.push({
+                index: match.index,
+                role: match[1],
+                format: 'llama3'
+            });
+        }
+    }
+    
+    debug(`  get_prompt_chat_segments_from_raw: Found ${matches.length} header matches (format: ${matches[0]?.format || 'none'})`);
     
     if (matches.length === 0) {
-        debug('  get_prompt_chat_segments_from_raw: No headers found, might not be Llama 3 format');
+        debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3 or ChatML format');
         return null;
     }
     
@@ -383,7 +493,16 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
             continue;
         }
         
-        let end_index = next ? next.index : raw_prompt.length;
+        let end_index;
+        if (current.format === 'chatml') {
+            // ChatML ends with <|im_end|>
+            const endMarker = raw_prompt.indexOf('<|im_end|>', current.index);
+            end_index = endMarker !== -1 ? endMarker + 10 : (next ? next.index : raw_prompt.length);
+        } else {
+            // Llama 3 ends at next header or end of prompt
+            end_index = next ? next.index : raw_prompt.length;
+        }
+        
         let segment = raw_prompt.slice(current.index, end_index);
         
         segments.push({
@@ -391,6 +510,7 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
             tokenCount: count_tokens(segment),
         });
     }
+    
     
     return segments;
 }
@@ -408,8 +528,29 @@ function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
     let map = new Map();
     let segment_index = 0;
     
+    // V32 FIX: Start from truncation index (first kept message) instead of 0
+    // After truncation, only the LAST N messages are in the prompt, not all messages
+    const startIndex = TRUNCATION_INDEX || 0;
+    
+    
+    // Check if all segments are the same role (completion/roleplay mode)
+    const allSameRole = segments.length > 0 && segments.every(s => s.role === segments[0].role);
+    if (allSameRole && segments.length > 1) {
+        // Sequential mapping: map segments to non-system chat messages in order
+        let segmentIdx = 0;
+        for (let chatIdx = startIndex; chatIdx < chat.length && segmentIdx < segments.length; chatIdx++) {
+            const msg = chat[chatIdx];
+            if (msg.is_system) continue; // Skip system messages
+            
+            map.set(chatIdx, segments[segmentIdx].tokenCount);
+            segmentIdx++;
+        }
+        
+        return map;
+    }
+    
     // Match segments to chat messages
-    for (let i = 0; i < chat.length && segment_index < segments.length; i++) {
+    for (let i = startIndex; i < chat.length && segment_index < segments.length; i++) {
         let message = chat[i];
         
         // Skip system messages
@@ -432,7 +573,7 @@ function get_prompt_message_tokens_from_raw(raw_prompt, chat) {
         segment_index += 1;
     }
     
-    debug(`  get_prompt_message_tokens_from_raw: Built map with ${map.size} entries`);
+    debug(`  get_prompt_message_tokens_from_raw: Built map with ${map.size} entries (starting from index ${startIndex})`);
     return map;
 }
 
@@ -443,7 +584,10 @@ function load_truncation_index() {
         TRUNCATION_INDEX = chat_metadata[MODULE_NAME].truncation_index;
         debug(`Loaded truncation index: ${TRUNCATION_INDEX}`);
     } else {
-        debug(`No truncation index found`);
+        // V34 BUG-002 FIX: Debug logging to verify no saved index exists
+        debug(`No truncation index found in metadata`);
+        debug(`  chat_metadata exists: ${!!chat_metadata}`);
+        debug(`  MODULE_NAME exists in metadata: ${!!chat_metadata?.[MODULE_NAME]}`);
     }
     
     // Also load correction factor if saved (Fix 4.2: Preserve correction factor across chat switches)
@@ -458,18 +602,36 @@ function load_truncation_index() {
         GENERATION_COUNT = chat_metadata[MODULE_NAME].generation_count || 0;
         STABLE_COUNT = chat_metadata[MODULE_NAME].stable_count || 0;
         RETRAIN_COUNT = chat_metadata[MODULE_NAME].retrain_count || 0;
-        DELETION_COUNT = chat_metadata[MODULE_NAME].deletion_count || 0;
         QDRANT_TOKEN_HISTORY = chat_metadata[MODULE_NAME].qdrant_token_history || [];
+        LAST_STABLE_CHAT_LENGTH = chat_metadata[MODULE_NAME].last_stable_chat_length || 0;
+
+        // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
+        // initialize it to current chat length to prevent constant recalculation
+        if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH === 0) {
+            const currentChatLength = getContext().chat?.length || 0;
+            LAST_STABLE_CHAT_LENGTH = currentChatLength;
+            debug(`Fixed legacy STABLE state: initialized LAST_STABLE_CHAT_LENGTH to ${currentChatLength}`);
+        }
+
         debug(`Loaded calibration state: ${CALIBRATION_STATE}, stable: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
     } else {
-        // Reset to defaults for new chats without saved state
-        CALIBRATION_STATE = 'WAITING';
-        GENERATION_COUNT = 0;
-        STABLE_COUNT = 0;
+        // V32 FIX: If correction_factor was loaded but calibration_state wasn't,
+        // this is an older chat that learned a factor before state was persisted.
+        // Set to CALIBRATING instead of WAITING to preserve the learned factor.
+        const hasLearnedFactor = CHAT_TOKEN_CORRECTION_FACTOR !== 1.0;
+        if (hasLearnedFactor) {
+            CALIBRATION_STATE = 'CALIBRATING';
+            GENERATION_COUNT = 0;
+            STABLE_COUNT = 3;  // Assume some stability since factor was learned
+            debug(`No calibration state but has learned factor (${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}), starting in CALIBRATING`);
+        } else {
+            CALIBRATION_STATE = 'WAITING';
+            GENERATION_COUNT = 0;
+            STABLE_COUNT = 0;
+            debug(`No calibration state found, reset to WAITING`);
+        }
         RETRAIN_COUNT = 0;
-        DELETION_COUNT = 0;
         QDRANT_TOKEN_HISTORY = [];
-        debug(`No calibration state found, reset to WAITING`);
     }
 }
 
@@ -486,9 +648,9 @@ function save_truncation_index() {
     chat_metadata[MODULE_NAME].generation_count = GENERATION_COUNT;
     chat_metadata[MODULE_NAME].stable_count = STABLE_COUNT;
     chat_metadata[MODULE_NAME].retrain_count = RETRAIN_COUNT;
-    chat_metadata[MODULE_NAME].deletion_count = DELETION_COUNT;
     chat_metadata[MODULE_NAME].qdrant_token_history = QDRANT_TOKEN_HISTORY;
-    
+    chat_metadata[MODULE_NAME].last_stable_chat_length = LAST_STABLE_CHAT_LENGTH;
+
     debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
     saveMetadataDebounced();
 }
@@ -515,6 +677,10 @@ function snapshot_chat_state() {
     const ctx = getContext();
     const chat = ctx.chat;
     
+    // V29 FIX: Preserve pre-snapshot state for deletion detection (fixes race condition)
+    PRE_SNAPSHOT_CHAT_LENGTH = LAST_CHAT_LENGTH;
+    PRE_SNAPSHOT_CHAT_HASHES = new Map(LAST_CHAT_HASHES);
+    
     if (!chat) {
         LAST_CHAT_LENGTH = 0;
         LAST_CHAT_HASHES.clear();
@@ -539,6 +705,8 @@ function handle_message_deleted() {
     const ctx = getContext();
     const chat = ctx.chat;
     const currentLength = chat ? chat.length : 0;
+    
+    // BUG-002 FIX: Use LAST_CHAT_LENGTH (stable snapshot before this event)
     const deletedCount = LAST_CHAT_LENGTH - currentLength;
     
     if (deletedCount <= 0) {
@@ -556,8 +724,8 @@ function handle_message_deleted() {
     let deletionsAfterTruncation = 0;
     
     if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
-        // Detect where deletions occurred using hash comparison
-        const oldHash = LAST_CHAT_HASHES.get(TRUNCATION_INDEX);
+        // V29 FIX: Detect where deletions occurred using PRE_SNAPSHOT hash (before CHAT_CHANGED)
+        const oldHash = PRE_SNAPSHOT_CHAT_HASHES.get(TRUNCATION_INDEX);
         const newMessage = chat[TRUNCATION_INDEX];
         const newHash = newMessage ? compute_message_hash(newMessage) : null;
         
@@ -584,61 +752,21 @@ function handle_message_deleted() {
     debug_trunc(`  Deletions before truncation: ${deletionsBeforeTruncation}`);
     debug_trunc(`  Deletions after truncation: ${deletionsAfterTruncation}`);
     
-    // Only count deletions that affect calibration (before/at truncation point)
-    // Deletions after truncation point are "free" - they don't destabilize anything
-    const impactfulDeletions = deletionsBeforeTruncation;
-    
-    if (impactfulDeletions > 0) {
-        DELETION_COUNT += impactfulDeletions;
-        debug_trunc(`  Impactful deletion count: ${DELETION_COUNT}/${DELETION_TOLERANCE}`);
-    } else {
-        debug_trunc(`  No impactful deletions (all were in recent context)`);
-    }
-    
-    // Check if tolerance exceeded
-    if (DELETION_COUNT >= DELETION_TOLERANCE) {
-        trigger_soft_recalibration('deletion tolerance exceeded');
-    }
-    
     // Save updated truncation index
     save_truncation_index();
     
     // Update snapshot
     snapshot_chat_state();
-    
-    // Update UI
-    update_resilience_ui();
-    
+
     // Refresh memory
     refresh_memory();
-    
+
+    // Update chat length tracking (FIX: ensure this always runs)
+    LAST_CHAT_LENGTH = currentLength;
+
     debug_trunc(`═══════════════════════════════`);
 }
 
-// Trigger soft recalibration (preserves correction factor)
-function trigger_soft_recalibration(reason) {
-    debug_trunc(`Triggering soft recalibration: ${reason}`);
-    
-    // Don't go back to WAITING or INITIAL_TRAINING
-    // Just reset to CALIBRATING to preserve learned correction factor
-    if (CALIBRATION_STATE === 'STABLE' || CALIBRATION_STATE === 'CALIBRATING') {
-        CALIBRATION_STATE = 'CALIBRATING';
-        STABLE_COUNT = 0;
-        DELETION_COUNT = 0;
-        
-        toastr.warning(
-            `Calibration reset due to ${reason}. Re-stabilizing...`,
-            MODULE_NAME_FANCY
-        );
-    } else if (CALIBRATION_STATE === 'RETRAINING') {
-        // Already retraining, just reset counter
-        DELETION_COUNT = 0;
-    }
-    // If WAITING or INITIAL_TRAINING, don't interrupt - these are essential
-    
-    update_calibration_ui();
-    update_resilience_ui();
-}
 
 // Detect message edits by comparing hashes
 function detect_message_edits() {
@@ -674,23 +802,6 @@ function detect_message_edits() {
     snapshot_chat_state();
 }
 
-// Update resilience UI (deletion counter display)
-function update_resilience_ui() {
-    const $count = $('#ct_ov_deletion_count');
-    
-    if ($count.length === 0) return;
-    
-    const countText = `${DELETION_COUNT}/${DELETION_TOLERANCE}`;
-    $count.text(countText);
-    
-    // Color coding: white by default, red only at tolerance-1 (about to trigger)
-    $count.removeClass('ct_text_green ct_text_yellow ct_text_red');
-    if (DELETION_COUNT >= DELETION_TOLERANCE - 1) {
-        // At or above tolerance-1 = red (about to trigger recalibration)
-        $count.addClass('ct_text_red');
-    }
-    // Otherwise default white text (no class needed)
-}
 
 function should_recalculate_truncation() {
     // Recalculate if target size changed
@@ -702,16 +813,12 @@ function should_recalculate_truncation() {
         return true;
     }
     
-    // Recalculate if correction factor changed significantly (more than 5%)
-    const savedCorrectionFactor = chat_metadata?.[MODULE_NAME]?.correction_factor;
-    if (savedCorrectionFactor !== undefined) {
-        const factorChange = Math.abs(CHAT_TOKEN_CORRECTION_FACTOR - savedCorrectionFactor);
-        const percentChange = (factorChange / savedCorrectionFactor) * 100;
-        if (percentChange > 5) {
-            debug(`Correction factor changed by ${percentChange.toFixed(1)}% (${savedCorrectionFactor.toFixed(3)} → ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}), forcing recalculation`);
-            return true;
-        }
-    }
+    // V35 FIX: Remove correction factor change detection here
+    // The factor is loaded in load_truncation_index() which is called before this,
+    // so comparing against the module-level variable is correct now.
+    // But we should NOT trigger recalculation just because factor changed -
+    // factor changes are continuous and expected during calibration.
+    // Only target size changes should force full recalculation.
     
     return false;
 }
@@ -722,26 +829,24 @@ function calculate_truncation_index() {
     const ctx = getContext();
     const chat = ctx.chat;
     let targetSize = get_settings('target_context_size');
+
     const batchSize = get_settings('batch_size');
     const minKeep = get_settings('min_messages_to_keep');
     const maxContext = getMaxContextSize();
+
+    // V33: Defensive cap - never exceed 90% of max context regardless of settings
+    const maxSafeContext = Math.floor(maxContext * 0.90);
+    if (targetSize > maxSafeContext) {
+        debug_trunc(`Target ${targetSize} exceeds safe limit, capping to ${maxSafeContext}`);
+        targetSize = maxSafeContext;
+    }
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
-    debug_trunc(`═══ TRUNCATION CALCULATION START ═══`);
-    debug_trunc(`  Chat length: ${chat.length} messages`);
-    debug_trunc(`  Current truncation index: ${TRUNCATION_INDEX || 0}`);
-    debug_trunc(`  Target size: ${targetSize} tokens`);
-    debug_trunc(`  Max context: ${maxContext} tokens`);
-    debug_trunc(`  Batch size: ${batchSize}`);
-    debug_trunc(`  Min messages to keep: ${minKeep}`);
     
     // SYNERGY: Account for Qdrant tokens in target size
     if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
         const qdrantTokens = get_qdrant_injection_tokens();
         if (qdrantTokens > 0) {
-            const originalTarget = targetSize;
             targetSize = targetSize - qdrantTokens;
-            debug_synergy(`Adjusted target from ${originalTarget} to ${targetSize} (Qdrant: ${qdrantTokens} tokens)`);
         }
     }
     
@@ -754,21 +859,33 @@ function calculate_truncation_index() {
         return 0;
     }
     
-    debug_trunc(`  `);
-    debug_trunc(`  === CONTEXT ANALYSIS ===`);
-    debug_trunc(`  Current full prompt: ${currentPromptSize} tokens`);
-    debug_trunc(`  Target full: ${targetSize} tokens`);
-    debug_trunc(`  Over target by: ${currentPromptSize - targetSize} tokens`);
     
-    // If we're under target, no truncation needed
+    // Check if we're under target
     if (currentPromptSize <= targetSize) {
-        debug_trunc('Under target, no truncation needed');
-        return 0;
+        // If no truncation is currently active, return 0
+        if (!TRUNCATION_INDEX || TRUNCATION_INDEX === 0) {
+            debug_trunc('Under target with no active truncation, returning 0');
+            return 0;
+        }
+        
+        // We're under target but have truncation - we should try to REDUCE it
+        // to include more messages and better utilize the context budget
+        debug_trunc(`Under target (${currentPromptSize} <= ${targetSize}) but truncation active (${TRUNCATION_INDEX})`);
+        debug_trunc('Will attempt to reduce truncation to include more messages...');
+        
+        // Fall through to the rest of the function which will try to optimize
     }
     
     // Get the current truncation index (or start at 0)
     let currentIndex = TRUNCATION_INDEX || 0;
     let maxIndex = Math.max(chat.length - minKeep, 0);
+    
+    // V32 FIX: Also limit to keeping at least 10% of messages (never truncate more than 90%)
+    // This prevents pathological cases where correction factor collapse causes massive over-truncation
+    const percentageMinKeep = Math.floor(chat.length * 0.10);
+    maxIndex = Math.min(maxIndex, chat.length - percentageMinKeep);
+    debug_trunc(`  Max index (with 10% floor): ${maxIndex} (keeps at least ${percentageMinKeep} messages)`);
+    
     let nextIndex = Math.min(currentIndex, maxIndex);
     
     // Calculate separator size for summaries
@@ -784,6 +901,18 @@ function calculate_truncation_index() {
     
     // Build message token map from last prompt for accurate estimation
     let last_raw_prompt = get_last_prompt_raw();
+
+    // V33: Fallback to cached raw prompt if unavailable but chat length matches
+    if (!last_raw_prompt) {
+        const currentChatLength = getContext().chat?.length || 0;
+        if (CACHED_RAW_PROMPT && CACHED_RAW_PROMPT_CHAT_LENGTH === currentChatLength) {
+            last_raw_prompt = CACHED_RAW_PROMPT;
+            debug_trunc(`Using cached raw prompt for fallback (${last_raw_prompt.length} chars, chat length: ${currentChatLength})`);
+        } else {
+            debug_trunc(`No cached prompt or chat length mismatch (${CACHED_RAW_PROMPT_CHAT_LENGTH} vs ${currentChatLength})`);
+        }
+    }
+
     let message_token_map = get_prompt_message_tokens_from_raw(last_raw_prompt, chat);
     
     // Calculate non-chat budget from the current raw prompt
@@ -792,14 +921,11 @@ function calculate_truncation_index() {
     let promptChatTokens = 0;
     let nonChatBudget;
     
-    debug_trunc(`  `);
-    debug_trunc(`  === PROMPT ANALYSIS ===`);
     
     if (!last_raw_prompt) {
-        // No raw prompt - estimate non-chat budget as 15% of current prompt size
-        // This is a rough estimate for the first generation only
-        nonChatBudget = Math.floor(currentPromptSize * 0.15);
-        debug_trunc(`  No raw prompt available - using 15% estimate`);
+        // V33: Use learned ratio from previous generations (more accurate than fixed 40%)
+        nonChatBudget = Math.floor(currentPromptSize * LAST_KNOWN_NON_CHAT_RATIO);
+        debug_trunc(`  No raw prompt available - using ${LAST_KNOWN_NON_CHAT_RATIO * 100}% learned ratio`);
         debug_trunc(`  Non-chat budget (estimated): ${nonChatBudget} tokens`);
     } else {
         // Have raw prompt - calculate accurately
@@ -808,14 +934,15 @@ function calculate_truncation_index() {
         let segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         if (segments && segments.length > 0) {
             promptChatTokens = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
-            debug_trunc(`  Chat segments found: ${segments.length}`);
+            DEBUG_SEGMENT_COUNT = segments.length;
         }
         
-        nonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
+        // V35 FIX: Do NOT apply correction factor to non-chat budget
+        // Non-chat (system prompt, etc.) is measured directly from raw prompt and is accurate
+        // Only CHAT token estimates need correction (they're calculated, not measured)
+        const rawNonChatBudget = Math.max(totalPromptTokens - promptChatTokens, 0);
+        nonChatBudget = rawNonChatBudget;  // Use raw value directly
         
-        debug_trunc(`  Raw prompt size: ${totalPromptTokens} tokens`);
-        debug_trunc(`  Chat tokens (from segments): ${promptChatTokens} tokens`);
-        debug_trunc(`  Non-chat budget: ${nonChatBudget} tokens`);
     }
     
     // Track token map usage
@@ -829,12 +956,14 @@ function calculate_truncation_index() {
             let mapped = message_token_map.get(index);
             if (mapped !== undefined) {
                 map_hits++;
+                DEBUG_MAP_HITS++;
                 return mapped;
             }
         }
         
         // Fall back to estimation
         map_misses++;
+        DEBUG_MAP_MISSES++;
         const roleHeaderTokens = message.is_user ? promptHeaderTokens.user : promptHeaderTokens.assistant;
         return count_tokens(message.mes) + roleHeaderTokens;
     }
@@ -852,17 +981,48 @@ function calculate_truncation_index() {
             // Messages at or after startIndex are kept in full
             const lagging = i < startIndex;
             if (!lagging) {
-                // Kept message - use full token count with correction factor
-                const rawEstimate = estimateMessagePromptTokens(message, i);
-                total += Math.floor(rawEstimate * CHAT_TOKEN_CORRECTION_FACTOR);
+                // Kept message - use full token count
+                // V32 FIX: Token map values are already accurate from prompt parsing
+                // Only apply correction factor to fallback estimates (map misses)
+                const mapValue = message_token_map ? message_token_map.get(i) : undefined;
+                if (mapValue !== undefined) {
+                    total += mapValue;  // Token map values are already accurate
+                } else {
+                    // Fall back to estimation with correction factor
+                    const rawEstimate = estimateMessagePromptTokens(message, i);
+                    total += Math.floor(rawEstimate * CHAT_TOKEN_CORRECTION_FACTOR);
+                }
                 continue;
             }
             
-            // Excluded message - use summary if available
-            const summary = get_memory(message);
-            if (summary && check_message_exclusion(message)) {
-                total += count_tokens(summary) + sepSize;
+            // V33 FIX: Do NOT add summary tokens for lagging messages!
+            // Summaries are injected via setExtensionPrompt() and counted in nonChatBudget.
+            // Adding them here caused double-counting and ~35% over-estimation.
+            // Lagging messages simply don't contribute to chat token count.
+        }
+        return total;
+    }
+    
+    // V29: Estimate chat size WITHOUT correction factor (for accurate factor calculation)
+    function estimateChatSizeRaw(startIndex) {
+        let total = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const message = chat[i];
+            
+            // Skip system messages
+            if (message.is_system) continue;
+            
+            // Messages before startIndex are excluded (lagging)
+            // Messages at or after startIndex are kept in full
+            const lagging = i < startIndex;
+            if (!lagging) {
+                // Kept message - use RAW token count (no correction factor)
+                const rawEstimate = estimateMessagePromptTokens(message, i);
+                total += rawEstimate;  // V29: No correction factor applied
+                continue;
             }
+            
+            // V33 FIX: Same as estimateChatSize() - no summary tokens for lagging messages
         }
         return total;
     }
@@ -870,12 +1030,6 @@ function calculate_truncation_index() {
     // Current chat size
     let currentChatSize = estimateChatSize(currentIndex);
     
-    debug_trunc(`  `);
-    debug_trunc(`  === CHAT SIZE ESTIMATION ===`);
-    debug_trunc(`  Starting index: ${currentIndex}`);
-    debug_trunc(`  Correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
-    debug_trunc(`  Estimated chat size: ${currentChatSize} tokens`);
-    debug_trunc(`  Total estimated: ${currentChatSize + nonChatBudget} tokens`);
     
     // If we're over target, truncate in batches
     if (currentChatSize + nonChatBudget > targetSize) {
@@ -912,27 +1066,59 @@ function calculate_truncation_index() {
         }
     }
     
-    const finalIndex = Math.max(nextIndex, currentIndex);
+    // V26/V27: If we're under target AND have truncation, try to REDUCE it
+    // This recovers context space when summaries are smaller than originals
+    let finalIndex = Math.max(nextIndex, currentIndex);
+    
+    // Check if we have room to include more messages
+    const currentTotal = estimateChatSize(finalIndex) + nonChatBudget;
+    const underTarget = currentTotal < targetSize;
+    const hasHeadroom = targetSize - currentTotal;
+    
+    
+    if (underTarget && finalIndex > 0) {
+        // Greedily include more messages while under target
+        let reducedIndex = finalIndex;
+        let iterations = 0;
+        const MAX_ITERATIONS = 50;  // Safety limit
+        
+        while (reducedIndex > 0 && iterations < MAX_ITERATIONS) {
+            iterations++;
+            
+            // Get info about the message we're considering including
+            const candidateIdx = reducedIndex - 1;
+            const msg = chat[candidateIdx];
+            
+            if (!msg || msg.is_system) {
+                reducedIndex--;
+                continue;
+            }
+            
+            // Calculate size if we include this message
+            const candidateSize = estimateChatSize(candidateIdx);
+            const candidateTotal = candidateSize + nonChatBudget;
+            
+            if (candidateTotal <= targetSize) {
+                reducedIndex--;
+            } else {
+                break;
+            }
+        }
+        
+        if (reducedIndex < finalIndex) {
+            finalIndex = reducedIndex;
+        }
+    }
     
     const predictedChatSize = estimateChatSize(finalIndex);
+    const predictedChatSizeRaw = estimateChatSizeRaw(finalIndex);  // V29: Raw prediction for factor calculation
     const predictedTotal = predictedChatSize + nonChatBudget;
     
-    debug_trunc(`  `);
-    debug_trunc(`  === MESSAGE TOKEN MAP ===`);
-    debug_trunc(`  Map stats: ${map_hits} hits, ${map_misses} misses (${message_token_map ? message_token_map.size : 0} entries)`);
-    
-    debug_trunc(`  `);
-    debug_trunc(`  === FINAL RESULT ===`);
-    debug_trunc(`  New truncation index: ${finalIndex} (was ${currentIndex}, ${finalIndex > currentIndex ? '+' + (finalIndex - currentIndex) + ' messages excluded' : 'no change'})`);
-    debug_trunc(`  Predicted chat size: ${predictedChatSize} tokens`);
-    debug_trunc(`  Predicted total: ${predictedTotal} tokens`);
-    debug_trunc(`  ${predictedTotal <= targetSize ? 'Under' : 'Over'} target by: ${Math.abs(predictedTotal - targetSize)} tokens`);
-    debug_trunc(`═══ TRUNCATION CALCULATION END ═══`);
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
     
     // Store predictions for comparison with actual results
     LAST_PREDICTED_SIZE = predictedTotal;
     LAST_PREDICTED_CHAT_SIZE = predictedChatSize;
+    LAST_PREDICTED_CHAT_SIZE_RAW = predictedChatSizeRaw;  // V29: Store raw for correction factor calculation
     LAST_PREDICTED_NON_CHAT_SIZE = nonChatBudget;
     
     return finalIndex;
@@ -978,9 +1164,66 @@ function update_message_inclusion_flags() {
         TRUNCATION_INDEX = null;
     }
     
-    // Calculate new truncation index if needed
-    if (TRUNCATION_INDEX === null || TRUNCATION_INDEX === 0) {
+    // V33 BUG-002 FIX: In STABLE state, only recalculate if new messages were added
+    const chatLength = ctx.chat?.length || 0;
+
+    // V34 FIX: Lock index during CALIBRATING and RETRAINING states
+    // Only allow recalculation in WAITING, INITIAL_TRAINING, or STABLE states
+    const lockIndex = CALIBRATION_STATE === 'CALIBRATING' || CALIBRATION_STATE === 'RETRAINING';
+
+    if (lockIndex) {
+        if (TRUNCATION_INDEX !== null) {
+            // V33: Robust index locking - use actual kept message count, not chat length delta
+            const keptMessages = chatLength - TRUNCATION_INDEX;
+            const batchSize = get_settings('batch_size');
+            const minKeep = get_settings('min_messages_to_keep');
+
+            // Only trim if we'd still keep minimum messages
+            if (keptMessages > minKeep + batchSize) {
+                // Check if we need a batch trim based on context overflow
+                // Use the ACTUAL context size from last generation, not estimate
+                const targetSize = get_settings('target_context_size');
+                if (LAST_ACTUAL_PROMPT_SIZE > targetSize * 1.10) {  // 10% over target
+                    TRUNCATION_INDEX = TRUNCATION_INDEX + batchSize;
+                    LAST_STABLE_CHAT_LENGTH = chatLength;
+                    debug_trunc(`LOCKED: Batch trim triggered (10% over target), index ${TRUNCATION_INDEX - batchSize}→${TRUNCATION_INDEX}`);
+                } else {
+                    debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (under 10% threshold)`);
+                }
+            } else {
+                debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (would exceed minKeep)`);
+            }
+        } else {
+            // Locked but no index yet - don't recalculate during calibration
+            debug_trunc(`LOCKED: No index yet during ${CALIBRATION_STATE}, skipping recalculation`);
+        }
+    } else if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH > 0) {
+        const newMessages = chatLength - LAST_STABLE_CHAT_LENGTH;
+
+        if (newMessages <= 0) {
+            // No new messages - keep cached truncation index for cache stability
+            debug_trunc(`STABLE: No new messages, keeping TRUNCATION_INDEX at ${TRUNCATION_INDEX}`);
+        } else {
+            // New messages added - recalculate and update tracking
+            debug_trunc(`STABLE: ${newMessages} new message(s), recalculating truncation`);
+            TRUNCATION_INDEX = calculate_truncation_index();
+            LAST_STABLE_CHAT_LENGTH = chatLength;
+        }
+    } else {
+        // Not locked and not in STABLE - recalculate (WAITING or INITIAL_TRAINING)
         TRUNCATION_INDEX = calculate_truncation_index();
+        // Set LAST_STABLE_CHAT_LENGTH when we first calculate the index
+        if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
+            LAST_STABLE_CHAT_LENGTH = chatLength;
+            debug_trunc(`Initial index set to ${TRUNCATION_INDEX}, tracking ${chatLength} messages`);
+        }
+        save_truncation_index();
+    }
+    
+    // Sanity check: ensure truncation index doesn't exceed chat length
+    if (TRUNCATION_INDEX > chat.length) {
+        debug_trunc(`WARNING: TRUNCATION_INDEX (${TRUNCATION_INDEX}) exceeds chat length (${chat.length}), capping to chat length`);
+        TRUNCATION_INDEX = chat.length;
         save_truncation_index();
     }
     
@@ -1017,20 +1260,53 @@ function concatenate_summaries(indexes) {
     return summary;
 }
 
-// Collect messages that need summaries injected
+// Calculate effective max summary injection tokens (auto or manual) - V22
+function get_max_summary_injection_tokens() {
+    if (get_settings('auto_limit_summaries')) {
+        // Auto-calculate: 20% of target budget
+        const maxContext = getMaxContextSize();
+        const targetUtilization = get_settings('target_utilization') || 0.80;
+        return Math.floor(maxContext * targetUtilization * 0.20);
+    }
+    // Manual: use setting directly (0 = unlimited)
+    return get_settings('max_summary_injection_tokens') || 0;
+}
+
+// Collect messages that need summaries injected (V22: respects token cap)
 function collect_summary_indexes() {
     const ctx = getContext();
     const chat = ctx.chat;
-    const indexes = [];
+    const maxTokens = get_max_summary_injection_tokens();
+    const separator = get_settings('summary_injection_separator');
+    const sepSize = calculate_injection_separator_size(separator);
     
-    for (let i = 0; i < chat.length; i++) {
+    const indexes = [];
+    let totalTokens = 0;
+    let droppedCount = 0;
+    
+    // Iterate from NEWEST to OLDEST (most recent summaries have priority)
+    for (let i = chat.length - 1; i >= 0; i--) {
         const lagging = get_data(chat[i], 'lagging');
         const memory = get_memory(chat[i]);
         
         if (lagging && memory) {
-            indexes.push(i);
+            const memoryTokens = count_tokens(memory) + sepSize;
+            
+            // Check if adding this summary would exceed cap
+            if (maxTokens > 0 && totalTokens + memoryTokens > maxTokens) {
+                droppedCount++;
+                continue;  // Skip this summary (dropped)
+            }
+            
+            indexes.unshift(i);  // Add to front to maintain chronological order
+            totalTokens += memoryTokens;
         }
     }
+    
+    // Store dropped count for dashboard display
+    DROPPED_SUMMARY_COUNT = droppedCount;
+    
+    debug_trunc(`Summary injection: ${indexes.length} included, ${droppedCount} dropped (${totalTokens}/${maxTokens} tokens)`);
     
     return indexes;
 }
@@ -1096,7 +1372,13 @@ let CURRENT_CONTEXT_SIZE = 0;
 let LAST_ACTUAL_PROMPT_SIZE = 0;
 let LAST_PREDICTED_SIZE = 0;
 let LAST_PREDICTED_CHAT_SIZE = 0;
+let LAST_PREDICTED_CHAT_SIZE_RAW = 0;  // V29: Uncorrected value for factor calculation
 let LAST_PREDICTED_NON_CHAT_SIZE = 0;
+let LAST_KNOWN_NON_CHAT_RATIO = 0.40;  // V33: Learned ratio, starts at 40%
+
+// Cache for valid Overview tab data to prevent wild utilization swings
+let LAST_VALID_UTILIZATION = null;
+let LAST_VALID_MAX_CONTEXT = null;
 
 // Adaptive correction factor (learned from previous generations)
 let CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Multiplier for chat token estimates
@@ -1177,56 +1459,99 @@ function update_status_display() {
     // Get the last prompt size
     const last_raw_prompt = get_last_prompt_raw();
     debug(`  last_raw_prompt exists: ${!!last_raw_prompt}`);
+
+    // V33: Cache valid raw prompt for fallback during calculate_truncation_index
+    if (last_raw_prompt) {
+        CACHED_RAW_PROMPT = last_raw_prompt;
+        CACHED_RAW_PROMPT_CHAT_LENGTH = getContext().chat?.length || 0;
+        debug_trunc(`Cached raw prompt (${last_raw_prompt.length} chars) for fallback`);
+    }
+
     if (!last_raw_prompt) {
         $display.hide();
         debug('  No raw prompt, hiding display');
         return;
     }
     
-    const actualSize = count_tokens(last_raw_prompt);
+    let actualSize = count_tokens(last_raw_prompt);
     const targetSize = get_settings('target_context_size');
+    
+    // Safety: If tokenizer returned 0, try segment-based calculation
+    if (actualSize === 0 && last_raw_prompt && last_raw_prompt.length > 0) {
+        const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
+        if (segments && segments.length > 0) {
+            actualSize = segments.reduce((sum, seg) => sum + seg.tokenCount, 0);
+            debug(`[TOKENIZER] Used segment sum: ${actualSize} tokens from ${segments.length} segments`);
+        } else {
+            // Ultimate fallback: character-based estimate
+            actualSize = Math.floor(last_raw_prompt.length / 4);
+            debug(`[TOKENIZER] Used char estimate: ${actualSize} tokens`);
+        }
+    }
+    
     const difference = actualSize - targetSize;
-    const percentError = Math.abs((difference / targetSize) * 100);
+    const percentError = targetSize > 0 ? Math.abs((difference / targetSize) * 100) : 0;
     
     // Calculate and apply adaptive correction factor
-    if (LAST_PREDICTED_SIZE > 0 && LAST_PREDICTED_CHAT_SIZE > 0) {
+    // V33: Skip factor update in STABLE, or when prediction is already very accurate (<1% error)
+    const predictionError = Math.abs(actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE;
+    const skipFactorUpdate = CALIBRATION_STATE === 'STABLE' || predictionError < 0.01;
+
+    // V34 FIX: Skip factor update entirely if no raw prompt
+    // This prevents estimation-based index jumps
+    if (!last_raw_prompt) {
+        debug_trunc('No raw prompt available - skipping factor update to preserve stability');
+        // Still update the memory display and overview
+        update_memory_display();
+        update_overview_tab();
+        return;
+    }
+
+    if (LAST_PREDICTED_SIZE > 0 && LAST_PREDICTED_CHAT_SIZE > 0 && !skipFactorUpdate) {
         // Analyze actual chat vs non-chat from current prompt
         const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         const actualChatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
         const actualNonChatTokens = actualSize - actualChatTokens;
         
-        // Calculate correction factor: actual / predicted
-        const newCorrectionFactor = actualChatTokens / LAST_PREDICTED_CHAT_SIZE;
+        // V29 FIX: Calculate correction factor using RAW prediction (not corrected)
+        // This breaks the feedback loop where corrected predictions caused factor convergence to sqrt(target)
+        const newCorrectionFactor = actualChatTokens / LAST_PREDICTED_CHAT_SIZE_RAW;
         const oldCorrectionFactor = CHAT_TOKEN_CORRECTION_FACTOR;
         
-        // Fix 2.1: Adaptive EMA alpha based on error magnitude
-        // Smaller errors = smaller alpha (more stable), larger errors = larger alpha (faster correction)
-        const errorMagnitude = Math.abs(newCorrectionFactor - oldCorrectionFactor);
-        const baseAlpha = 0.15;  // Reduced from 0.3 for more stability
-        const maxAlpha = 0.4;    // Maximum alpha for large errors
-        const adaptiveAlpha = Math.min(baseAlpha + (errorMagnitude * 0.5), maxAlpha);
+        // V33: Use higher weight on first measurement (faster initial convergence)
+        const predictedChat = LAST_PREDICTED_CHAT_SIZE;
+        const errorPercent = Math.abs(predictedChat - actualChatTokens) / actualChatTokens;
+        const isFirstMeasurement = GENERATION_COUNT === 1 && CALIBRATION_STATE === 'INITIAL_TRAINING';
+        const newWeight = isFirstMeasurement ? 0.80 : (errorPercent > 0.20 ? 0.60 : 0.40);
         
-        // Smooth the correction factor using adaptive EMA
-        CHAT_TOKEN_CORRECTION_FACTOR = (adaptiveAlpha * newCorrectionFactor) + ((1 - adaptiveAlpha) * CHAT_TOKEN_CORRECTION_FACTOR);
+        // Smooth the correction factor using adaptive weight
+        CHAT_TOKEN_CORRECTION_FACTOR = (newWeight * newCorrectionFactor) + ((1 - newWeight) * oldCorrectionFactor);
         
-        // Log correction factor updates
-        debug_trunc(`═══════════════════════════════════════════════════════════════`);
-        debug_trunc(`═══ CORRECTION FACTOR UPDATE ═══`);
-        debug_trunc(`  PREDICTED total: ${LAST_PREDICTED_SIZE} tokens`);
-        debug_trunc(`  ACTUAL total: ${actualSize} tokens`);
-        debug_trunc(`  Difference: ${actualSize - LAST_PREDICTED_SIZE} tokens (${((actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
-        debug_trunc(`  `);
-        debug_trunc(`  PREDICTED chat: ${LAST_PREDICTED_CHAT_SIZE} tokens`);
-        debug_trunc(`  ACTUAL chat: ${actualChatTokens} tokens`);
-        debug_trunc(`  Chat difference: ${actualChatTokens - LAST_PREDICTED_CHAT_SIZE} tokens (${((actualChatTokens - LAST_PREDICTED_CHAT_SIZE) / LAST_PREDICTED_CHAT_SIZE * 100).toFixed(1)}%)`);
-        debug_trunc(`  `);
-        debug_trunc(`  PREDICTED non-chat: ${LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
-        debug_trunc(`  ACTUAL non-chat: ${actualNonChatTokens} tokens`);
-        debug_trunc(`  Non-chat difference: ${actualNonChatTokens - LAST_PREDICTED_NON_CHAT_SIZE} tokens`);
-        debug_trunc(`  `);
-        debug_trunc(`  New correction factor: ${newCorrectionFactor.toFixed(3)}`);
-        debug_trunc(`  Smoothed factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} (was ${oldCorrectionFactor.toFixed(3)})`);
-        debug_trunc(`═══════════════════════════════════════════════════════════════`);
+        debug_trunc(`  Smoothing weight: ${newWeight} (error: ${(errorPercent * 100).toFixed(1)}%)`);
+        
+        // V32 FIX: Clamp correction factor to prevent runaway deviation
+        // Lower bound relaxed from 0.7 to 0.5 to handle edge cases
+        const MIN_CORRECTION_FACTOR = 0.5;
+        const MAX_CORRECTION_FACTOR = 1.5;
+        CHAT_TOKEN_CORRECTION_FACTOR = Math.max(MIN_CORRECTION_FACTOR, Math.min(MAX_CORRECTION_FACTOR, CHAT_TOKEN_CORRECTION_FACTOR));
+        
+        debug_trunc(`  Bounded factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} (min: ${MIN_CORRECTION_FACTOR}, max: ${MAX_CORRECTION_FACTOR})`);
+        
+        // Log correction factor updates (simplified)
+        debug_trunc(`Factor Update: ${oldCorrectionFactor.toFixed(3)}→${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)} | Pred: ${LAST_PREDICTED_SIZE} Actual: ${actualSize} (${((actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE * 100).toFixed(1)}%)`);
+        debug_trunc(`  Chat: pred ${LAST_PREDICTED_CHAT_SIZE} actual ${actualChatTokens} | Non-chat: pred ${LAST_PREDICTED_NON_CHAT_SIZE} actual ${actualNonChatTokens}`);
+        
+        // V34 BUG-002 FIX: Defensive save after correction factor update
+        // Ensures factor is persisted immediately after being learned
+        save_truncation_index();
+
+        // V33: Update learned non-chat ratio for future fallback
+        // NOTE: Must be inside this block because actualNonChatTokens is defined here
+        if (actualSize > 0 && actualNonChatTokens > 0) {
+            LAST_KNOWN_NON_CHAT_RATIO = actualNonChatTokens / actualSize;
+            // Clamp to reasonable bounds (20% - 60%)
+            LAST_KNOWN_NON_CHAT_RATIO = Math.max(0.20, Math.min(0.60, LAST_KNOWN_NON_CHAT_RATIO));
+        }
     }
     
     // Determine color based on error percentage
@@ -1262,6 +1587,32 @@ function update_status_display() {
     
     LAST_ACTUAL_PROMPT_SIZE = actualSize;
     
+    // Call generation summary with collected data
+    const ctx = getContext();
+    const chat = ctx.chat;
+    const summaryIndexes = collect_summary_indexes();
+    const summaryInjection = get_summary_injection();
+    const summaryTokens = summaryInjection ? count_tokens(summaryInjection) : 0;
+    
+    log_generation_summary({
+        chatLength: chat.length,
+        oldIndex: TRUNCATION_INDEX || 0,
+        newIndex: TRUNCATION_INDEX || 0,
+        actualTokens: actualSize,
+        targetTokens: get_settings('target_context_size'),
+        factor: CHAT_TOKEN_CORRECTION_FACTOR,
+        state: CALIBRATION_STATE,
+        stableCount: STABLE_COUNT,
+        stableThreshold: STABLE_THRESHOLD,
+        segmentCount: DEBUG_SEGMENT_COUNT,
+        mapHits: DEBUG_MAP_HITS,
+        mapMisses: DEBUG_MAP_MISSES,
+        summaryCount: summaryIndexes.length,
+        summaryTokens: summaryTokens,
+        droppedCount: DROPPED_SUMMARY_COUNT,
+        estimationMode: USING_ESTIMATION_MODE
+    });
+    
     // Run auto-calibration if enabled
     if (get_settings('auto_calibrate_target')) {
         calibrate_target_size(actualSize);
@@ -1283,7 +1634,8 @@ function reset_calibration() {
     STABLE_COUNT = 0;
     RETRAIN_COUNT = 0;
     CHAT_TOKEN_CORRECTION_FACTOR = 1.0;
-    
+    LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
+
     debug('Calibration reset to WAITING');
     update_calibration_ui();
     
@@ -1298,11 +1650,9 @@ function calibrate_target_size(actualSize) {
     const idealTarget = Math.floor(maxContext * targetUtilization);
     
     // Calculate the threshold for when to start calibrating
-    // Use target_utilization * max_context if auto-calibration is enabled
-    // Otherwise use target_context_size as the threshold
-    const startThreshold = autoCalibrate
-        ? Math.floor(maxContext * targetUtilization)
-        : get_settings('target_context_size');
+    // ALWAYS use target_context_size as threshold
+    // The ideal (maxContext * targetUtilization) is what we calibrate TOWARD, not what we wait FOR
+    const startThreshold = get_settings('target_context_size');
     
     // Update Qdrant token history for averaging (Fix 3.2)
     update_qdrant_token_history();
@@ -1310,123 +1660,121 @@ function calibrate_target_size(actualSize) {
     // Fix 3.1: Use dynamic tolerance that accounts for Qdrant variance
     const tolerance = get_dynamic_tolerance();
     
-    // Calculate current utilization
-    const currentUtilization = actualSize / maxContext;
-    const deviation = Math.abs(currentUtilization - targetUtilization);
+    // V33 FIX: Calculate deviation against calibrated target, not utilization
+    // Question: "Is actual prompt close to our target_context_size?"
+    // NOT: "Is actualSize/maxContext close to targetUtilization?"
+    let calibratedTarget = get_settings('target_context_size');
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
-    debug_trunc(`═══ CALIBRATION STATE MACHINE ═══`);
-    debug_trunc(`  Current state: ${CALIBRATION_STATE}`);
-    debug_trunc(`  Max context: ${maxContext} tokens`);
-    debug_trunc(`  Target utilization: ${(targetUtilization * 100).toFixed(1)}%`);
-    debug_trunc(`  Start threshold: ${startThreshold.toLocaleString()} tokens`);
-    debug_trunc(`  Tolerance: ${(tolerance * 100).toFixed(1)}%`);
-    debug_trunc(`  `);
-    debug_trunc(`  Actual prompt: ${actualSize} tokens`);
-    debug_trunc(`  Actual utilization: ${(currentUtilization * 100).toFixed(1)}%`);
-    debug_trunc(`  Deviation from target: ${(deviation * 100).toFixed(1)}%`);
-    debug_trunc(`  Within tolerance: ${deviation <= tolerance ? 'YES' : 'NO'}`);
+    // V34 FIX: Do NOT subtract Qdrant tokens from calibration target.
+    // The truncation system already handles Qdrant in calculate_truncation_index().
+    // Subtracting here causes double-subtraction and unreachable targets.
+    // Calibration should compare actualSize against the RAW target_context_size.
+    if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
+        const qdrantAvg = get_averaged_qdrant_tokens();
+        debug_trunc(`  Qdrant tokens (info only, not subtracted from calibration target): ${qdrantAvg}`);
+    }
+    
+    const deviation = Math.abs((actualSize - calibratedTarget) / calibratedTarget);
+    
+    // Keep utilization for display/logging purposes
+    const currentUtilization = actualSize / maxContext;
+    
     
     switch (CALIBRATION_STATE) {
         case 'WAITING':
             // Check if we've reached the threshold to start calibrating
-            debug_trunc(`  `);
-            if (actualSize < startThreshold) {
-                debug_trunc(`  Waiting: ${actualSize.toLocaleString()} tokens < threshold ${startThreshold.toLocaleString()} tokens`);
-                debug_trunc(`  → Remaining in WAITING`);
+            // V34 BUG-001 FIX: Also check if truncation is active (messages being excluded)
+            // If truncation is active, we should start calibrating immediately even if under threshold
+            const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
+            
+            if (actualSize < startThreshold && !truncationActive) {
             } else {
                 // Transition to INITIAL_TRAINING
                 CALIBRATION_STATE = 'INITIAL_TRAINING';
                 GENERATION_COUNT = 0;
-                debug_trunc(`  Threshold reached: ${actualSize.toLocaleString()} tokens >= ${startThreshold.toLocaleString()} tokens`);
-                debug_trunc(`  → Transitioning to INITIAL_TRAINING`);
-                toastr.info('Context threshold reached - starting calibration training', MODULE_NAME_FANCY);
+                // REQ-003: Removed threshold popup - state transition is silent
             }
             break;
             
         case 'INITIAL_TRAINING':
             // Wait for correction factor to stabilize
             GENERATION_COUNT++;
-            debug_trunc(`  `);
-            debug_trunc(`  Training generation ${GENERATION_COUNT}/${TRAINING_GENERATIONS}`);
-            
+
             if (GENERATION_COUNT >= TRAINING_GENERATIONS) {
                 CALIBRATION_STATE = 'CALIBRATING';
                 GENERATION_COUNT = 0;
-                debug_trunc(`  → Transitioning to CALIBRATING`);
-                
+                // V33: Initialize chat length tracking for index locking
+                LAST_STABLE_CHAT_LENGTH = getContext().chat?.length || 0;
+                debug_trunc(`Entering CALIBRATING with ${LAST_STABLE_CHAT_LENGTH} messages`);
                 // Calculate initial target based on learned correction factor
                 calculate_calibrated_target(maxContext, targetUtilization);
-            } else {
-                debug_trunc(`  → Remaining in INITIAL_TRAINING`);
             }
             break;
             
         case 'CALIBRATING':
-            // Apply calibration and check if we're within tolerance
-            debug_trunc(`  `);
-            if (deviation <= tolerance) {
+            // V34 FIX: Use factor convergence for stability, not deviation
+            // Factor convergence is more stable than target deviation
+            const factorChange = Math.abs(CHAT_TOKEN_CORRECTION_FACTOR - LAST_CORRECTION_FACTOR);
+            const factorConverged = factorChange < 0.02;  // < 2% change = converged
+
+            // Update factor tracking
+            LAST_CORRECTION_FACTOR = CHAT_TOKEN_CORRECTION_FACTOR;
+
+            debug_trunc(`Factor convergence: ${(factorChange * 100).toFixed(2)}% change (threshold: 2%)`);
+
+            if (factorConverged) {
                 STABLE_COUNT++;
-                debug_trunc(`  Stable count: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
-                
+                debug_trunc(`Factor converged! Stable count: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
+
                 if (STABLE_COUNT >= STABLE_THRESHOLD) {
                     CALIBRATION_STATE = 'STABLE';
-                    DELETION_COUNT = 0;  // Reset deletion counter on reaching stable
-                    debug_trunc(`  → Transitioning to STABLE`);
+                    // V33: Track chat length for STABLE state locking
+                    LAST_STABLE_CHAT_LENGTH = getContext().chat?.length || 0;
+                    debug_trunc(`Entering STABLE state with ${LAST_STABLE_CHAT_LENGTH} messages`);
                     toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
-                    update_resilience_ui();
-                } else {
-                    debug_trunc(`  → Remaining in CALIBRATING`);
                 }
             } else {
-                // Fix 1.2: Gradual decay instead of complete reset
-                // Only decay by 1-2 instead of resetting to 0, preserving some progress
-                const decayAmount = deviation > tolerance * 1.5 ? 2 : 1;
-                STABLE_COUNT = Math.max(0, STABLE_COUNT - decayAmount);
-                debug_trunc(`  Outside tolerance, stable count decayed by ${decayAmount} to ${STABLE_COUNT}`);
-                
-                // Recalculate target
-                calculate_calibrated_target(maxContext, targetUtilization);
-                debug_trunc(`  → Remaining in CALIBRATING`);
+                // Factor still changing - decay stable count only for very large swings
+                // Relaxed threshold: only decay if factor is swinging extremely wildly (> 10% change)
+                if (factorChange > 0.10) {
+                    STABLE_COUNT = Math.max(0, STABLE_COUNT - 1);
+                    debug_trunc(`Factor unstable (${(factorChange * 100).toFixed(1)}% change), stable count: ${STABLE_COUNT}`);
+                }
+                // Don't recalculate target during calibration - just learn the factor
+                // calculate_calibrated_target() removed to prevent instability
             }
             break;
             
         case 'RETRAINING':
             // Similar to initial training but after destabilization
             RETRAIN_COUNT++;
-            debug_trunc(`  `);
-            debug_trunc(`  Retraining generation ${RETRAIN_COUNT}/${TRAINING_GENERATIONS}`);
             
             if (RETRAIN_COUNT >= TRAINING_GENERATIONS) {
                 CALIBRATION_STATE = 'CALIBRATING';
                 RETRAIN_COUNT = 0;
                 STABLE_COUNT = 0;
-                debug_trunc(`  → Transitioning back to CALIBRATING`);
-                
                 calculate_calibrated_target(maxContext, targetUtilization);
-            } else {
-                debug_trunc(`  → Remaining in RETRAINING`);
             }
             break;
             
         case 'STABLE':
             // Monitor for destabilization
-            debug_trunc(`  `);
             if (deviation > tolerance * 1.5) {  // Use 1.5x tolerance to avoid bouncing
-                debug_trunc(`  Destabilized! Deviation ${(deviation * 100).toFixed(1)}% > ${(tolerance * 1.5 * 100).toFixed(1)}%`);
-                debug_trunc(`  → Transitioning to RETRAINING`);
                 CALIBRATION_STATE = 'RETRAINING';
                 RETRAIN_COUNT = 0;
                 STABLE_COUNT = 0;
+                LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
                 toastr.warning('Calibration destabilized - retraining...', MODULE_NAME_FANCY);
-            } else {
-                debug_trunc(`  → Remaining in STABLE (monitoring)`);
             }
             break;
     }
     
-    debug_trunc(`═══════════════════════════════════════════════════════════════`);
+    // Single calibration summary line
+    debug_trunc(`Calibration: ${CALIBRATION_STATE} | Dev: ${(deviation * 100).toFixed(1)}% | Stable: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
+    
+    save_truncation_index();
     update_calibration_ui();
+    update_overview_tab();  // BUG-001 FIX: Sync Overview tab after state transitions
 }
 
 // Calculate and set calibrated target
@@ -1437,16 +1785,17 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
     
     const idealTarget = Math.floor(maxContext * targetUtilization);
     
-    // Fix 3.1 & 3.2: Account for Qdrant variance using averaged tokens
-    let qdrantAdjustment = 0;
+    // V35 FIX: Remove Qdrant adjustment here - it's already handled in calculate_truncation_index()
+    // via the Synergy adjustment. Double-subtracting causes underutilization.
+    // Log the average for debugging but don't subtract it again.
     if (get_settings('qdrant_enabled') && get_settings('account_qdrant_tokens')) {
-        qdrantAdjustment = get_averaged_qdrant_tokens();
-        debug_trunc(`    Qdrant token average: ${qdrantAdjustment} (from ${QDRANT_TOKEN_HISTORY.length} samples)`);
+        const qdrantAvg = get_averaged_qdrant_tokens();
+        debug_trunc(`    Qdrant token average: ${qdrantAvg} (already subtracted in truncation calc, not applied here)`);
     }
     
     // Fix 4.1: Dampened target adjustment - move only 70% toward the ideal
     // This prevents overcorrection and oscillation
-    const rawAdjustedTarget = Math.floor((idealTarget - qdrantAdjustment) / CHAT_TOKEN_CORRECTION_FACTOR);
+    const rawAdjustedTarget = Math.floor(idealTarget / CHAT_TOKEN_CORRECTION_FACTOR);
     const currentTarget = get_settings('target_context_size');
     const dampingFactor = 0.7;  // Only move 70% of the way to the new target
     const adjustedTarget = Math.floor(currentTarget + (rawAdjustedTarget - currentTarget) * dampingFactor);
@@ -1458,21 +1807,26 @@ function calculate_calibrated_target(maxContext, targetUtilization) {
     
     debug_trunc(`  Calculating calibrated target:`);
     debug_trunc(`    Ideal target: ${idealTarget}`);
-    debug_trunc(`    Qdrant adjustment: ${qdrantAdjustment}`);
     debug_trunc(`    Correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}`);
     debug_trunc(`    Raw adjusted target: ${rawAdjustedTarget}`);
     debug_trunc(`    Dampened target: ${adjustedTarget}`);
     debug_trunc(`    Final target: ${finalTarget}`);
     
-    // Fix 3.3: Only update if significantly different (>5% change, increased from 2%)
+    // V33: Reduced from 5% to 3% - dampening already prevents oscillation
     const changePct = Math.abs(finalTarget - currentTarget) / currentTarget;
     
-    if (changePct > 0.05) {
+    if (changePct > 0.03) {
         set_settings('target_context_size', finalTarget);
         $('#ct_target_size').val(finalTarget);
         
-        // Reset truncation index since target changed
-        reset_truncation_index();
+        // V34 FIX: Only reset truncation index if NOT in active calibration
+        // Resetting during calibration destabilizes convergence
+        if (CALIBRATION_STATE !== 'CALIBRATING' && CALIBRATION_STATE !== 'RETRAINING') {
+            reset_truncation_index();
+            debug_trunc(`  Reset truncation index (not in active calibration)`);
+        } else {
+            debug_trunc(`  Skipped truncation reset (in ${CALIBRATION_STATE} state)`);
+        }
         
         debug_trunc(`  Updated target from ${currentTarget} to ${finalTarget}`);
     } else {
@@ -1549,22 +1903,23 @@ function update_calibration_ui() {
     
     const maxContext = getMaxContextSize();
     const autoCalibrate = get_settings('auto_calibrate_target');
-    const startThreshold = autoCalibrate
-        ? Math.floor(maxContext * get_settings('target_utilization'))
-        : get_settings('target_context_size');
+    // Threshold is always target_context_size (matches calibrate_target_size logic)
+    const startThreshold = get_settings('target_context_size');
     
     switch (CALIBRATION_STATE) {
         case 'WAITING':
             $phase.text('Waiting').addClass('ct_phase_waiting');
-            $progress.text(`${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()} tokens`);
+            // REQ-004: Always show 0/TRAINING_GENERATIONS format in WAITING state
+            $progress.text(`0/${TRAINING_GENERATIONS}`);
             break;
         case 'INITIAL_TRAINING':
-            $phase.text('Initial Training').addClass('ct_phase_training');
+            $phase.text('Training').addClass('ct_phase_training');
             $progress.text(`${GENERATION_COUNT}/${TRAINING_GENERATIONS} generations`);
             break;
         case 'CALIBRATING':
             $phase.text('Calibrating').addClass('ct_phase_calibrating');
-            $progress.text(`${STABLE_COUNT}/${STABLE_THRESHOLD} stable`);
+            // Training is complete in CALIBRATING phase, show checkmark
+            $progress.text(`${TRAINING_GENERATIONS}/${TRAINING_GENERATIONS} ✓`);
             break;
         case 'RETRAINING':
             $phase.text('Retraining').addClass('ct_phase_retraining');
@@ -1585,98 +1940,175 @@ function update_calibration_ui() {
     } else {
         $utilization.text('-');
     }
+    
+    // Update stability UI
+    update_stability_ui();
+}
+
+// Update stability progress UI display (V33)
+function update_stability_ui() {
+    const $stableCount = $('#ct_ov_stable_count');
+    
+    if ($stableCount.length === 0) return;
+    
+    const requiredStable = STABLE_THRESHOLD; // Use actual constant (5)
+    const countText = `${STABLE_COUNT}/${requiredStable}`;
+    $stableCount.text(countText);
+    
+    // Color coding: green when close to stable
+    $stableCount.removeClass('ct_text_green ct_text_yellow ct_text_red');
+    if (STABLE_COUNT >= requiredStable) {
+        $stableCount.addClass('ct_text_green');
+    } else if (STABLE_COUNT >= requiredStable - 1) {
+        $stableCount.addClass('ct_text_yellow');
+    }
+    // Otherwise default white text
 }
 
 // ==================== OVERVIEW TAB FUNCTIONS ====================
 
 // Calculate World Rules tokens from raw prompt
-// World Rules are bounded by "## Lore:" and "## {{user}}'s Persona:" (flexible matching)
+// World Rules are bounded by "## Lore:" and "## [AnyName]'s Persona:" (flexible matching)
 function calculate_world_rules_tokens(raw_prompt) {
     if (!raw_prompt) return 0;
-    
+
     // Use flexible regex patterns to handle variations in spacing/formatting
     const lorePattern = /##\s*Lore:/i;
-    const personaPattern = /##\s*\{\{user\}\}'s Persona:/i;
-    
+    // Match any name followed by "'s Persona:" - the name is replaced from {{user}} placeholder
+    const personaPattern = /##\s*.+?'s Persona:/i;
+
     const loreMatch = raw_prompt.match(lorePattern);
     if (!loreMatch) return 0;
-    
+
     const startIndex = loreMatch.index;
-    
+
     // Search for persona marker after the lore marker
     const afterLore = raw_prompt.substring(startIndex);
     const personaMatch = afterLore.match(personaPattern);
     if (!personaMatch) return 0;
-    
+
     const endIndex = startIndex + personaMatch.index;
-    
+
     const worldRulesSection = raw_prompt.substring(startIndex, endIndex);
     return count_tokens(worldRulesSection);
 }
 
+// Calculate LoreVault tokens from raw prompt
+// LoreVault content is bounded by [STORY MEMORY] and [/STORY MEMORY]
+function calculate_lorevault_tokens(raw_prompt) {
+    if (!raw_prompt) return 0;
+
+    const startMarker = '[STORY MEMORY]';
+    const endMarker = '[/STORY MEMORY]';
+
+    const startIndex = raw_prompt.indexOf(startMarker);
+    if (startIndex === -1) return 0;
+
+    const endIndex = raw_prompt.indexOf(endMarker, startIndex);
+    if (endIndex === -1) return 0;
+
+    const content = raw_prompt.substring(startIndex, endIndex + endMarker.length);
+    return count_tokens(content);
+}
+
 // Update the Overview tab with current stats
 function update_overview_tab() {
+    // VIS-001 FIX: Handle initial state (no prompt yet)
     const last_raw_prompt = get_last_prompt_raw();
-    const maxContext = getMaxContextSize();
-    
-    // Update Gauge
-    if (last_raw_prompt) {
-        const actualSize = count_tokens(last_raw_prompt);
-        const utilization = (actualSize / maxContext * 100);
+    if (!last_raw_prompt) {
+        $('#ct_gauge_fill').css('width', '0%');
+        $('#ct_gauge_value').text('0.0%');
+        $('#ct_gauge_max').text('Waiting for first generation...');
         
-        // Update gauge fill
-        const $gaugeFill = $('#ct_gauge_fill');
-        $gaugeFill.css('width', `${Math.min(utilization, 100)}%`);
-        
-        // Update target marker position
-        const targetUtilization = get_settings('target_utilization');
-        $('#ct_gauge_target').css('left', `${targetUtilization * 100}%`);
-        
-        // Smart gauge color based on calibration state
-        $gaugeFill.removeClass('ct_gauge_green ct_gauge_yellow ct_gauge_red');
-        
-        if (CALIBRATION_STATE === 'WAITING') {
-            // Waiting phase = always green (extension not active yet)
-            $gaugeFill.addClass('ct_gauge_green');
+        // REQ-002 FIX: Update Cal. Progress even without prompt data
+        if (get_settings('auto_calibrate_target')) {
+            $('#ct_ov_cal_phase').text('Waiting')
+                .removeClass('ct_phase_waiting ct_phase_training ct_phase_calibrating ct_phase_retraining ct_phase_stable')
+                .addClass('ct_phase_waiting');
+            $('#ct_ov_cal_progress').text('0/2');
         } else {
-            // Active phases - color based on deviation from target
-            const tolerance = get_settings('calibration_tolerance');
-            const targetPct = targetUtilization * 100;
-            const deviation = Math.abs(utilization - targetPct);
-            const tolerancePct = tolerance * 100;
-            
-            // Midpoint between target and tolerance boundary
-            const midpointDeviation = tolerancePct / 2;
-            
-            if (deviation <= midpointDeviation) {
-                // Within midpoint - green (close to target)
-                $gaugeFill.addClass('ct_gauge_green');
-            } else if (deviation <= tolerancePct) {
-                // Between midpoint and tolerance - yellow (slightly off)
-                $gaugeFill.addClass('ct_gauge_yellow');
+            $('#ct_ov_cal_phase').text('Disabled')
+                .removeClass('ct_phase_waiting ct_phase_training ct_phase_calibrating ct_phase_retraining ct_phase_stable');
+            $('#ct_ov_cal_progress').text('--');
+        }
+        return;
+    }
+
+    const maxContext = getMaxContextSize();
+
+    // Declare actualSize at function scope with default
+    let actualSize = 0;
+
+    // Update Gauge
+    if (last_raw_prompt && maxContext > 0) {
+        actualSize = count_tokens(last_raw_prompt);
+        
+        // Calculate CORRECTED estimate (what API will actually receive)
+        // This is what users care about - not the internal tokenizer output
+        const correctedActualSize = Math.floor(actualSize * CHAT_TOKEN_CORRECTION_FACTOR);
+        const utilization = (correctedActualSize / maxContext * 100);
+        
+        // Sanity check - utilization should be between 0 and 150%
+        if (utilization >= 0 && utilization <= 150) {
+            LAST_VALID_UTILIZATION = utilization;
+            LAST_VALID_MAX_CONTEXT = maxContext;
+
+            // Update gauge fill
+            const $gaugeFill = $('#ct_gauge_fill');
+            $gaugeFill.css('width', `${Math.min(utilization, 100)}%`);
+            // ... rest of gauge update
+
+            // Show CORRECTED value with "(est)" suffix to indicate it's estimated
+            $('#ct_gauge_value').text(`${utilization.toFixed(1)}%`);
+            $('#ct_gauge_max').text(`of ${maxContext.toLocaleString()} tokens (est)`);
+        } else {
+            // Invalid utilization - use cached or show placeholder
+            if (LAST_VALID_UTILIZATION !== null) {
+                // Use last known good values
+                $('#ct_gauge_value').text(`${LAST_VALID_UTILIZATION.toFixed(1)}%`);
+                $('#ct_gauge_max').text(`of ${LAST_VALID_MAX_CONTEXT.toLocaleString()} tokens`);
             } else {
-                // Beyond tolerance - red (significantly off)
-                $gaugeFill.addClass('ct_gauge_red');
+                // Show placeholder
+                $('#ct_gauge_value').text('--%');
             }
         }
-        
-        // Update labels
-        $('#ct_gauge_value').text(`${utilization.toFixed(1)}%`);
-        $('#ct_gauge_max').text(`of ${maxContext.toLocaleString()} tokens`);
-        
-        // Update Breakdown Bar (now includes World Rules)
+    } else {
+        // No data available
+        if (LAST_VALID_UTILIZATION !== null && LAST_VALID_MAX_CONTEXT !== null) {
+            // Keep showing last valid data
+            $('#ct_gauge_value').text(`${LAST_VALID_UTILIZATION.toFixed(1)}%`);
+            $('#ct_gauge_max').text(`of ${LAST_VALID_MAX_CONTEXT.toLocaleString()} tokens`);
+        } else {
+            // V32: Show clear "waiting" state instead of confusing zeros
+            $('#ct_gauge_fill').css('width', '0%');
+            $('#ct_gauge_value').text('--');
+            $('#ct_gauge_max').text(`Waiting for first generation`);
+        }
+    }
+
+    // Update Breakdown Bar (now includes World Rules)
+    // Only calculate breakdown if we have a valid actualSize and maxContext
+    if (last_raw_prompt && actualSize > 0 && maxContext > 0) {
         const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
         const chatTokens = segments ? segments.reduce((sum, seg) => sum + seg.tokenCount, 0) : 0;
         const worldRulesTokens = calculate_world_rules_tokens(last_raw_prompt);
+        const lorevaultTokens = calculate_lorevault_tokens(last_raw_prompt);
         const summaryTokens = count_tokens(get_summary_injection());
         const qdrantTokens = get_qdrant_injection_tokens();
-        // System is everything else (total - chat - worldRules - summaries - qdrant)
-        const systemTokens = Math.max(0, actualSize - chatTokens - worldRulesTokens - summaryTokens - qdrantTokens);
-        const freeTokens = Math.max(0, maxContext - actualSize);
+        // System is everything else (total - chat - worldRules - lorevault - summaries - qdrant)
+        const systemTokens = Math.max(0, actualSize - chatTokens - worldRulesTokens - lorevaultTokens - summaryTokens - qdrantTokens);
         
-        const chatPct = (chatTokens / maxContext * 100);
-        const systemPct = (systemTokens / maxContext * 100);
+        // Use corrected values for breakdown so it matches the gauge
+        const correctedChatTokens = Math.floor(chatTokens * CHAT_TOKEN_CORRECTION_FACTOR);
+        const correctedSystemTokens = Math.floor(systemTokens * CHAT_TOKEN_CORRECTION_FACTOR);
+        // NOTE: Summary and Qdrant tokens are already counted separately and don't need correction
+        const correctedActualSize = Math.floor(actualSize * CHAT_TOKEN_CORRECTION_FACTOR);
+        const freeTokens = Math.max(0, maxContext - correctedActualSize);
+
+        const chatPct = (correctedChatTokens / maxContext * 100);
+        const systemPct = (correctedSystemTokens / maxContext * 100);
         const worldRulesPct = (worldRulesTokens / maxContext * 100);
+        const lorevaultPct = (lorevaultTokens / maxContext * 100);
         const summaryPct = (summaryTokens / maxContext * 100);
         const qdrantPct = (qdrantTokens / maxContext * 100);
         const freePct = (freeTokens / maxContext * 100);
@@ -1684,18 +2116,20 @@ function update_overview_tab() {
         $('#ct_breakdown_chat').css('width', `${chatPct}%`);
         $('#ct_breakdown_system').css('width', `${systemPct}%`);
         $('#ct_breakdown_worldrules').css('width', `${worldRulesPct}%`);
+        $('#ct_breakdown_lorevault').css('width', `${lorevaultPct}%`);
         $('#ct_breakdown_summaries').css('width', `${summaryPct}%`);
         $('#ct_breakdown_qdrant').css('width', `${qdrantPct}%`);
         $('#ct_breakdown_free').css('width', `${freePct}%`);
         
-        // Update token counts in foldable section
-        $('#ct_breakdown_chat_tokens').text(`${chatTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_system_tokens').text(`${systemTokens.toLocaleString()} tokens`);
+        // Update token counts in foldable section with corrected values
+        $('#ct_breakdown_chat_tokens').text(`${correctedChatTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_system_tokens').text(`${correctedSystemTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_worldrules_tokens').text(`${worldRulesTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_lorevault_tokens').text(`${lorevaultTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_summaries_tokens').text(`${summaryTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_qdrant_tokens').text(`${qdrantTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_free_tokens').text(`${freeTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_total_tokens').html(`<strong>${actualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
+        $('#ct_breakdown_total_tokens').html(`<strong>${correctedActualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens (est)</strong>`);
         
         // Update Truncation Stats Card (now simplified)
         const targetSize = get_settings('target_context_size');
@@ -1714,7 +2148,20 @@ function update_overview_tab() {
         $('#ct_ov_difference').text(`${difference > 0 ? '+' : ''}${difference.toLocaleString()}`);
         $('#ct_ov_error').text(`${percentError.toFixed(1)}%`);
         $('#ct_ov_trunc_index').text(TRUNCATION_INDEX !== null ? TRUNCATION_INDEX : '--');
-        $('#ct_ov_correction').text(CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3));
+        // Display correction factor with color coding
+        const factor = CHAT_TOKEN_CORRECTION_FACTOR;
+        $('#ct_ov_correction').text(factor.toFixed(3));
+        
+        // Color code: green if reasonable (0.7-1.1), yellow if borderline, red if extreme
+        $('#ct_ov_correction').removeClass('ct_text_green ct_text_yellow ct_text_red');
+        if (factor >= 0.7 && factor <= 1.1) {
+            // Reasonable range - no special color
+        } else if (factor >= 0.5 && factor <= 1.3) {
+            $('#ct_ov_correction').addClass('ct_text_yellow');
+        } else {
+            $('#ct_ov_correction').addClass('ct_text_red');
+        }
+        
     } else {
         // No data available
         $('#ct_gauge_fill').css('width', '0%');
@@ -1729,25 +2176,26 @@ function update_overview_tab() {
         let progressText = '--';
         
         const autoCalibrate = get_settings('auto_calibrate_target');
-        const startThreshold = autoCalibrate
-            ? Math.floor(maxContext * get_settings('target_utilization'))
-            : get_settings('target_context_size');
+        // Threshold is always target_context_size (matches calibrate_target_size logic)
+        const startThreshold = get_settings('target_context_size');
         
         switch (CALIBRATION_STATE) {
             case 'WAITING':
                 phaseText = 'Waiting';
                 phaseClass = 'ct_phase_waiting';
-                progressText = `${LAST_ACTUAL_PROMPT_SIZE.toLocaleString()} / ${startThreshold.toLocaleString()}`;
+                // REQ-004: Always show 0/TRAINING_GENERATIONS format
+                progressText = `0/${TRAINING_GENERATIONS}`;
                 break;
             case 'INITIAL_TRAINING':
-                phaseText = 'Initial Training';
+                phaseText = 'Training';
                 phaseClass = 'ct_phase_training';
                 progressText = `${GENERATION_COUNT}/${TRAINING_GENERATIONS}`;
                 break;
             case 'CALIBRATING':
                 phaseText = 'Calibrating';
                 phaseClass = 'ct_phase_calibrating';
-                progressText = `${STABLE_COUNT}/${STABLE_THRESHOLD} stable`;
+                // Training is complete in CALIBRATING phase, show checkmark
+                progressText = `${TRAINING_GENERATIONS}/${TRAINING_GENERATIONS} ✓`;
                 break;
             case 'RETRAINING':
                 phaseText = 'Retraining';
@@ -1780,7 +2228,10 @@ function update_overview_tab() {
     
     // Update Qdrant Memory Section in Overview
     update_overview_memories();
-    
+
+    // Update Vector Statistics (V11)
+    update_vector_stats_display();
+
     // Update Predictions and Summarization Stats
     update_prediction_display();
     update_summary_stats_display();
@@ -1794,51 +2245,51 @@ function collect_summarization_stats() {
     const chat = ctx.chat;
     
     const stats = {
-        total: 0,
-        summarized: 0,
-        pending: 0,
-        inQueue: 0,
-        inContext: 0,
-        notApplicable: 0
+        totalMessages: 0,      // Total non-system messages
+        truncated: 0,          // Messages excluded from context (lagging)
+        summarized: 0,         // Truncated messages that have summaries
+        pending: 0,            // Truncated messages without summaries (not in queue)
+        inQueue: 0,            // Messages currently being processed
+        inContext: 0           // Messages still in active context
     };
     
     if (!chat || chat.length === 0) {
         return stats;
     }
     
+    // FIX: Handle null/undefined TRUNCATION_INDEX properly
     const truncIndex = TRUNCATION_INDEX || 0;
     const queueIndexes = new Set(summaryQueue.queue);
-    
+
     for (let i = 0; i < chat.length; i++) {
         const message = chat[i];
-        
+
         // Skip system messages
         if (message.is_system) {
             continue;
         }
-        
-        stats.total++;
-        
-        const lagging = i < truncIndex;  // Message is excluded from context
+
+        stats.totalMessages++;
+
+        // FIX: Correct lagging check - message is excluded if i < truncIndex
+        const lagging = truncIndex > 0 && i < truncIndex;  // Message is excluded from context
         const hasSummary = !!get_memory(message);
-        const needsSummary = get_data(message, 'needs_summary');
         const inQueue = queueIndexes.has(i);
         
-        if (inQueue) {
-            // Currently in the summarization queue
-            stats.inQueue++;
-        } else if (!lagging) {
-            // Message is in active context (not excluded)
-            stats.inContext++;
-        } else if (hasSummary) {
-            // Excluded message that has been summarized
-            stats.summarized++;
-        } else if (needsSummary) {
-            // Excluded message waiting to be summarized
-            stats.pending++;
+        // Context status (independent of queue status)
+        if (lagging) {
+            stats.truncated++;
+            
+            // Summarization status for truncated messages
+            if (hasSummary) {
+                stats.summarized++;
+            } else if (inQueue) {
+                stats.inQueue++;
+            } else {
+                stats.pending++;
+            }
         } else {
-            // Message that doesn't need summarization (too short, excluded by settings, etc.)
-            stats.notApplicable++;
+            stats.inContext++;
         }
     }
     
@@ -1951,9 +2402,19 @@ function update_prediction_display() {
     const calibrationPrediction = get_calibration_prediction();
     
     // Next Trim prediction (matches HTML ID: ct_ov_next_trim)
+    // VIS-002 FIX: Show status during calibration instead of "(target exceeded)"
+    const isTraining = CALIBRATION_STATE === 'INITIAL_TRAINING';
+    const isCalibrating = ['CALIBRATING', 'RETRAINING'].includes(CALIBRATION_STATE);
+
     if (trimEstimate.generations !== null) {
         if (trimEstimate.generations === 0) {
-            $('#ct_ov_next_trim').text('Imminent (target exceeded)').addClass('ct_text_orange');
+            if (isTraining) {
+                $('#ct_ov_next_trim').text('Training').removeClass('ct_text_orange');
+            } else if (isCalibrating) {
+                $('#ct_ov_next_trim').text('Calibrating...').removeClass('ct_text_orange');
+            } else {
+                $('#ct_ov_next_trim').text('Imminent (target exceeded)').addClass('ct_text_orange');
+            }
         } else {
             $('#ct_ov_next_trim').text(`~${trimEstimate.generations} generation${trimEstimate.generations !== 1 ? 's' : ''}`).removeClass('ct_text_orange');
         }
@@ -1979,36 +2440,74 @@ function update_prediction_display() {
 function update_summary_stats_display() {
     const stats = collect_summarization_stats();
     
-    // Calculate percentages for progress bar
-    const total = stats.total || 1;  // Avoid division by zero
-    const pctDone = (stats.summarized / total) * 100;
-    const pctPending = (stats.pending / total) * 100;
-    const pctQueue = (stats.inQueue / total) * 100;
-    const pctActive = (stats.inContext / total) * 100;
-    const pctNA = (stats.notApplicable / total) * 100;
+    // Calculate counts for Version 2E design
+    const excludedCount = stats.truncated;  // Messages excluded from context
+    const summarizedCount = stats.summarized;  // Excluded messages with summaries
+    const pendingCount = stats.pending + stats.inQueue;  // Excluded messages awaiting summarization
+
+    // FIX: Safe coverage calculation (avoid division by zero)
+    const coveragePercent = excludedCount > 0 ? Math.round((summarizedCount / excludedCount) * 100) : 0;
     
-    // Update Overview tab stats card (matches HTML IDs: ct_ov_sum_*)
-    $('#ct_ov_sum_total').text(stats.total);
-    $('#ct_ov_sum_done').text(stats.summarized);
+    // Update Overview tab Summaries card (Version 2E design)
+    $('#ct_ov_excluded_count').text(`${excludedCount} messages`);
+    $('#ct_ov_summarized_count').text(summarizedCount);
+    $('#ct_ov_pending_count').text(pendingCount);
+    
+    // V22: Update dropped count (messages with summaries that exceeded token cap)
+    $('#ct_ov_dropped_count').text(DROPPED_SUMMARY_COUNT);
+    if (DROPPED_SUMMARY_COUNT > 0) {
+        $('#ct_ov_dropped_count').addClass('ct_text_red');
+    } else {
+        $('#ct_ov_dropped_count').removeClass('ct_text_red');
+    }
+    
+    // Update coverage indicator with percentage and appropriate class
+    const $coverageIndicator = $('#ct_ov_summary_coverage');
+    $coverageIndicator.removeClass('ct_coverage_good ct_coverage_partial ct_coverage_low ct_coverage_none');
+    
+    if (excludedCount === 0) {
+        // No excluded messages yet
+        $coverageIndicator.text('--').addClass('ct_coverage_none');
+    } else if (coveragePercent >= 75) {
+        // Good coverage (≥75%)
+        $coverageIndicator.text(`${Math.round(coveragePercent)}% ✓`).addClass('ct_coverage_good');
+    } else if (coveragePercent >= 25) {
+        // Partial coverage (25-75%)
+        $coverageIndicator.text(`${Math.round(coveragePercent)}% ⚠`).addClass('ct_coverage_partial');
+    } else if (coveragePercent > 0) {
+        // Low coverage (<25%)
+        $coverageIndicator.text(`${Math.round(coveragePercent)}% ⚠`).addClass('ct_coverage_low');
+    } else {
+        // No coverage (0%)
+        $coverageIndicator.text('0%').addClass('ct_coverage_none');
+    }
+    
+    // Legacy: Update old element IDs if they still exist (backwards compatibility)
+    $('#ct_ov_sum_total').text(excludedCount);
+    $('#ct_ov_sum_done').text(summarizedCount);
     $('#ct_ov_sum_pending').text(stats.pending);
     $('#ct_ov_sum_queue').text(stats.inQueue);
     $('#ct_ov_sum_active').text(stats.inContext);
-    $('#ct_ov_sum_na').text(stats.notApplicable);
     
     // Update Truncation tab stats panel (matches HTML IDs: ct_sum_*_count)
-    $('#ct_sum_total_count').text(stats.total);
+    $('#ct_sum_total_count').text(stats.totalMessages);
     $('#ct_sum_done_count').text(stats.summarized);
     $('#ct_sum_pending_count').text(stats.pending);
     $('#ct_sum_queue_count').text(stats.inQueue);
     $('#ct_sum_active_count').text(stats.inContext);
-    $('#ct_sum_na_count').text(stats.notApplicable);
     
-    // Update progress bar segments
+    // Calculate percentages for progress bar (Truncation tab)
+    const total = stats.totalMessages || 1;  // Avoid division by zero
+    const pctDone = (stats.summarized / total) * 100;
+    const pctPending = (stats.pending / total) * 100;
+    const pctQueue = (stats.inQueue / total) * 100;
+    const pctActive = (stats.inContext / total) * 100;
+    
+    // Update progress bar segments (Truncation tab)
     $('#ct_sum_bar_done').css('width', `${pctDone}%`);
     $('#ct_sum_bar_pending').css('width', `${pctPending}%`);
     $('#ct_sum_bar_queue').css('width', `${pctQueue}%`);
     $('#ct_sum_bar_active').css('width', `${pctActive}%`);
-    $('#ct_sum_bar_na').css('width', `${pctNA}%`);
 }
 
 // Update the memory display in Overview tab
@@ -2016,13 +2515,13 @@ function update_overview_memories() {
     const $count = $('#ct_ov_memory_count');
     const $list = $('#ct_ov_memory_list');
     
-    if (!get_settings('qdrant_enabled') || CURRENT_QDRANT_MEMORIES.length === 0) {
+    if (!get_settings('qdrant_enabled') || INJECTED_QDRANT_MEMORIES.length === 0) {
         $count.text('Retrieved Memories (0)');
         $list.html('<div class="ct_memory_empty">Generate a message to retrieve memories</div>');
         return;
     }
-    
-    const memories = CURRENT_QDRANT_MEMORIES;
+
+    const memories = INJECTED_QDRANT_MEMORIES;
     $count.text(`Retrieved Memories (${memories.length})`);
     
     // Build memory list HTML (reuse from update_memory_display)
@@ -2070,6 +2569,21 @@ function update_target_size_state() {
     }
 }
 
+// Update auto-limit summaries display value (V22)
+function update_auto_limit_display() {
+    const $display = $('#ct_auto_limit_value');
+    
+    if (!get_settings('auto_limit_summaries')) {
+        $display.text('(manual)');
+        return;
+    }
+    
+    const maxContext = getMaxContextSize();
+    const targetUtilization = get_settings('target_utilization') || 0.80;
+    const autoLimit = Math.floor(maxContext * targetUtilization * 0.20);
+    $display.text(`~${autoLimit.toLocaleString()} tokens`);
+}
+
 // ==================== POPOUT FUNCTIONS ====================
 
 // Check if popout is currently visible
@@ -2101,16 +2615,15 @@ function openPopout() {
     }
     
     // Create the popout element with reset size button
+    // VIS-006, VIS-007: Removed pie chart icon and X button
     $POPOUT = $(`
         <div id="ct_popout" class="draggable" style="display: none;">
             <div class="panelControlBar flex-container" id="ctPopoutHeader">
-                <div class="fa-solid fa-chart-pie" style="margin-right: 10px;"></div>
                 <div class="title">${MODULE_NAME_FANCY}</div>
                 <div class="flex1"></div>
                 <div class="fa-solid fa-arrows-left-right hoverglow dragReset" title="Reset to default size"></div>
                 <div class="fa-solid fa-grip drag-grabber hoverglow" title="Drag to move"></div>
                 <div class="fa-solid fa-lock-open hoverglow dragLock" title="Lock position"></div>
-                <div class="fa-solid fa-circle-xmark hoverglow dragClose" title="Close"></div>
             </div>
             <div id="ct_popout_content_container"></div>
         </div>
@@ -2199,10 +2712,11 @@ function closePopout() {
     
     $currentPopout.fadeOut(250, () => {
         const $drawer = $('#context_truncator_settings');
+        const $inlineDrawer = $drawer.find('.inline-drawer');
         
         if ($currentDrawerContent) {
-            // Move content back to drawer
-            $currentDrawerContent.detach().appendTo($drawer);
+            // Move content back to drawer (inside .inline-drawer for correct toggle behavior)
+            $currentDrawerContent.detach().appendTo($inlineDrawer);
             $currentDrawerContent.addClass('open').show();
         }
         
@@ -2440,6 +2954,16 @@ function add_popout_button() {
     }
     
     debug_trunc('Popout button added to header (minimal insertion)');
+    
+    // Intercept drawer header clicks when popout is visible
+    // This allows clicking the dropdown header to close the popout and return to inline mode
+    $header.on('click.ctPopout', function(event) {
+        if (POPOUT_VISIBLE) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            closePopout();
+        }
+    });
 }
 
 // ==================== MEMORY DISPLAY ====================
@@ -2449,13 +2973,13 @@ function update_memory_display() {
     const $count = $('#ct_memory_count');
     const $list = $('#ct_memory_list');
     
-    if (!get_settings('qdrant_enabled') || CURRENT_QDRANT_MEMORIES.length === 0) {
+    if (!get_settings('qdrant_enabled') || INJECTED_QDRANT_MEMORIES.length === 0) {
         $count.text('No memories retrieved');
         $list.html('<div class="ct_memory_empty">Generate a message to retrieve memories</div>');
         return;
     }
-    
-    const memories = CURRENT_QDRANT_MEMORIES;
+
+    const memories = INJECTED_QDRANT_MEMORIES;
     $count.text(`${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} retrieved`);
     
     // Build memory list HTML
@@ -2496,12 +3020,80 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Helper function to escape regex special characters
+function escapeRegex(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Validate summary output against prompt specifications (V33)
+function validate_summary(summary, ctx, maxWords) {
+    if (!summary || typeof summary !== 'string') {
+        return { valid: false, reason: 'Empty or invalid summary' };
+    }
+    
+    const trimmed = summary.trim();
+    
+    // Rule 1: Minimum length (too short = incomplete)
+    if (trimmed.length < 15) {
+        return { valid: false, reason: `Too short: ${trimmed.length} chars (min 15)` };
+    }
+    
+    // Rule 2: Must start with speaker label
+    const charName = ctx.name2 || 'Character';
+    const userName = ctx.name1 || 'User';
+    const speakerPattern = new RegExp(
+        `^(${escapeRegex(charName)}:|${escapeRegex(userName)}:|Narrator:)`,
+        'i'
+    );
+    if (!speakerPattern.test(trimmed)) {
+        return { valid: false, reason: 'Missing speaker label at start' };
+    }
+    
+    // Rule 3: Word count check
+    const wordCount = trimmed.split(/\s+/).length;
+    if (wordCount > maxWords) {
+        return { valid: false, reason: `Too many words: ${wordCount} > ${maxWords}` };
+    }
+    
+    // Rule 4: No forbidden patterns (thinking, reasoning)
+    const forbiddenPatterns = [
+        { pattern: /<think>/i, name: '<think> tag' },
+        { pattern: /<\/think>/i, name: '</think> tag' },
+        { pattern: /^Hmm,?/i, name: 'Hmm reasoning' },
+        { pattern: /^Let me\b/i, name: 'Let me...' },
+        { pattern: /^I need to\b/i, name: 'I need to...' },
+        { pattern: /^First,\b/i, name: 'First,...' },
+        { pattern: /^Looking at\b/i, name: 'Looking at...' },
+        { pattern: /^Analyzing\b/i, name: 'Analyzing...' },
+        { pattern: /^I think\b/i, name: 'I think...' },
+        { pattern: /^Now,\b/i, name: 'Now,...' },
+        { pattern: /\(\s*\d+\s*words?\s*\)/i, name: 'word count annotation' },
+    ];
+    
+    for (const { pattern, name } of forbiddenPatterns) {
+        if (pattern.test(trimmed)) {
+            return { valid: false, reason: `Contains forbidden pattern: ${name}` };
+        }
+    }
+    
+    // Rule 5: Should be roughly one sentence (no multiple sentences)
+    // Check for sentence-ending punctuation followed by space and uppercase
+    const multipleSentencePattern = /[.!?]\s+[A-Z]/;
+    if (multipleSentencePattern.test(trimmed)) {
+        return { valid: false, reason: 'Multiple sentences detected' };
+    }
+    
+    return { valid: true, reason: null };
+}
+
 // Summarization functionality
 class SummaryQueue {
     constructor() {
         this.queue = [];
         this.active = false;
         this.stopped = false;
+        this.abortController = null;  // For hard-stopping current generation
+        this._currentlyGenerating = false;  // Lock to prevent parallel requests
     }
     
     async summarize(indexes) {
@@ -2516,38 +3108,79 @@ class SummaryQueue {
             this.queue.push(index);
         }
         
-        // Show stop button, hide summarize button
-        this.updateStopButtonVisibility(true);
+        // Transform button to active/stop state
+        this.updateButtonState('active');
         
         if (!this.active) {
             await this.process();
         }
     }
     
-    // Stop the summarization queue
+    // Stop the summarization queue (hard-stop)
     stop() {
         if (!this.active) return;
         
+        // Update UI immediately FIRST (before any async operations)
+        this.updateButtonState('stopping');
+
+        // Set all stop flags
+        // Mark as stopped immediately to prevent new work from starting
         this.stopped = true;
+
+        // Skip any pending rate-limit delays in process loop
+        this._skipPendingDelay = true;
+
+        // Clear queued indexes so no further messages are processed
         this.queue = [];
         
+        // Abort current generation if in progress
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+            debug('Aborted current summarization generation');
+        }
+        
         debug('Summarization queue stopped by user');
-        toastr.warning('Summarization stopped', MODULE_NAME_FANCY);
     }
     
-    // Update stop button visibility
-    updateStopButtonVisibility(showStop) {
-        if (showStop) {
-            $('#ct_stop_summarize, #ct_ov_stop_summarize').show();
-            $('#ct_summarize_all, #ct_ov_summarize').hide();
+    // Transform button to active/inactive/stopping state
+    updateButtonState(state) {
+        const $buttons = $('#ct_summarize_all, #ct_ov_summarize');
+        
+        if (state === 'active') {
+            $buttons.addClass('ct_active').removeClass('ct_stopping').prop('disabled', false);
+            $buttons.find('i').removeClass('fa-compress fa-spinner fa-spin').addClass('fa-stop');
+            $buttons.find('span').text('Stop');
+            // Remove title to prevent hover tooltip during operation
+            $buttons.removeAttr('title');
+            // Remove any pending mouseenter handler
+            $buttons.off('mouseenter.ct_title');
+        } else if (state === 'stopping') {
+            $buttons.addClass('ct_stopping').removeClass('ct_active').prop('disabled', true);
+            $buttons.find('i').removeClass('fa-compress fa-stop').addClass('fa-spinner fa-spin');
+            $buttons.find('span').text('Stopping...');
+            // Remove title during stopping state
+            $buttons.removeAttr('title');
         } else {
-            $('#ct_stop_summarize, #ct_ov_stop_summarize').hide();
-            $('#ct_summarize_all, #ct_ov_summarize').show();
+            $buttons.removeClass('ct_active ct_stopping').prop('disabled', false);
+            $buttons.find('i').removeClass('fa-stop fa-spinner fa-spin').addClass('fa-compress');
+            $buttons.find('span').text('Summarize All');
+            // Don't restore title immediately - wait for mouse to leave and re-enter
+            // This prevents tooltip flash when operation completes with mouse over button
+            $buttons.off('mouseenter.ct_title').one('mouseenter.ct_title', function() {
+                $(this).attr('title', 'Summarize all messages without summaries');
+            });
         }
     }
     
     async process() {
         this.active = true;
+        // Ensure any previous skip flag is cleared at the start of processing
+        this._skipPendingDelay = false;
+        
+        // Update stats at start of processing
+        update_summary_stats_display();
+        update_overview_tab();
         
         while (this.queue.length > 0 && !this.stopped) {
             const index = this.queue.shift();
@@ -2555,13 +3188,221 @@ class SummaryQueue {
             
             // Update stats display after each message
             update_summary_stats_display();
+            update_overview_tab();
+
+            // Rate limiting between summary requests (cancellable by stop)
+            const delayMs = Number(get_settings('summary_request_delay')) || 0;
+            if (delayMs > 0 && !this.stopped) {
+                const start = Date.now();
+                await new Promise(resolve => {
+                    const checkInterval = 50; // poll interval
+                    const tick = () => {
+                        if (this.stopped || this._skipPendingDelay) {
+                            resolve();
+                            return;
+                        }
+                        const elapsed = Date.now() - start;
+                        if (elapsed >= delayMs) {
+                            resolve();
+                            return;
+                        }
+                        setTimeout(tick, checkInterval);
+                    };
+                    setTimeout(tick, checkInterval);
+                });
+                // Reset skip flag after a controlled delay cycle
+                this._skipPendingDelay = false;
+            }
         }
         
         this.active = false;
         this.stopped = false;
         
-        // Hide stop button, show summarize button
-        this.updateStopButtonVisibility(false);
+        // Final update after processing completes
+        update_summary_stats_display();
+        update_overview_tab();
+        
+        // Transform button back to normal state (handles both completion and stop)
+        this.updateButtonState('inactive');
+    }
+    
+    /**
+     * Cleans summary output by removing GLM-4.5 thinking blocks and extracting actual summary.
+     * GLM-4.5 models wrap reasoning in <think>...</think> tags. This function:
+     * 1. Detects and extracts content AFTER the last </think> tag (the actual summary)
+     * 2. Removes any remaining <think> blocks that appear mid-response
+     * 3. Strips orphaned tags from truncated responses
+     *
+     * @param {string} text - Raw model output that may contain <think> blocks
+     * @returns {string} Cleaned summary text with all thinking content removed
+     */
+    clean_summary_output(text) {
+        try {
+            if (!text) return '';
+
+            let cleaned = text.trim();
+
+            // CRITICAL FIX: Handle responses that contain <think> anywhere (not just start)
+            // Reasoning models output thinking, then the actual summary content
+            const thinkStartIdx = cleaned.toLowerCase().indexOf('<think>');
+            if (thinkStartIdx !== -1) {
+                // Use lastIndexOf to find the LAST </think> tag (handles multiple <think> blocks)
+                const closeIdx = cleaned.toLowerCase().lastIndexOf('</think>');
+                if (closeIdx !== -1) {
+                    // Extract content AFTER the think block (this is the actual summary)
+                    const afterThink = cleaned.substring(closeIdx + 8).trim();
+                    if (afterThink.length > 0) {
+                        cleaned = afterThink;
+                        debug_trunc(`Extracted ${afterThink.length} chars after </think> block`);
+                    } else {
+                        // Think block exists but no content after it
+                        debug_trunc('Summary contains only <think> block with no content after, returning empty');
+                        return '';
+                    }
+                } else {
+                    // No closing tag - content was truncated mid-thinking
+                    debug_trunc('Summary contains unclosed <think> block, returning empty');
+                    return '';
+                }
+            }
+
+            // Remove any COMPLETE <think>...</think> blocks that appear mid-response
+            cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+            // Remove orphaned think tags (incomplete blocks from truncation)
+            // First, if there's an opening <think> without closing, truncate there
+            const openThink = cleaned.indexOf('<think>');
+            if (openThink !== -1) {
+                cleaned = cleaned.substring(0, openThink).trim();
+            }
+            // Then remove any stray </think> tags
+            cleaned = cleaned.replace(/<\/think>/gi, '').trim();
+
+            // Strip common markup tokens that may appear in model outputs
+            cleaned = cleaned.replace(/<\/?s>/gi, '');         // Remove <s> and </s>
+            cleaned = cleaned.replace(/\[\/?INST\]/gi, '');  // Remove [INST] and [/INST]
+
+            // Normalize excessive newlines and whitespace to single spaces
+            cleaned = cleaned.replace(/\r\n|\r|\n/g, ' ');
+            cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
+
+            // Remove lines that start with common prefixes like "Summary:" or "Output:"
+            cleaned = cleaned.split('\n').map(l => l.trim()).filter(l => {
+                const low = l.toLowerCase();
+                return !(low.startsWith('summary:') || low.startsWith('output:'));
+            }).join(' ');
+
+            // Patterns that indicate reasoning/thinking content (truncate at these)
+            const thinkingPatterns = [
+                /\bHmm,?/i,
+                /\bLet me\b/i,
+                /\bLooking at\b/i,
+                /\bI need to\b/i,
+                /\bFirst,\b/i,
+                /\bThe (user|message|speaker)\b/i,
+                /\bBreaking down\b/i,
+                /\bI'?ll\b/i,
+                /\bI think\b/i,
+                /\bNow,\b/i,
+                /\bFor the\b/i,
+                /\bThis (captures|covers|summarizes)\b/i,
+                /\bPerfect!\b/i,
+                /\bThat's\b/i,
+                /\(\d+\s*words?\)/i,
+                /\bI've\b/i,
+                /\bAnalyzing\b/i,
+                /\bThe key\b/i,
+            ];
+
+            for (const pattern of thinkingPatterns) {
+                const match = cleaned.search(pattern);
+                if (match !== -1) {
+                    cleaned = cleaned.substring(0, match).trim();
+                }
+            }
+
+            // Remove any remaining word count annotations like "(45 words)"
+            cleaned = cleaned.replace(/\(\s*\d+\s*words?\s*\)/gi, '').trim();
+
+            // If multiple sentences remain, pick the first sentence-like fragment
+            const sentenceEnd = /([.!?])\s+/;
+            let firstChunk = cleaned;
+            if (cleaned.length > 0) {
+                const parts = cleaned.split(sentenceEnd);
+                if (parts && parts.length > 0) {
+                    firstChunk = parts[0];
+                }
+            }
+
+            // Final cleanup: remove surrounding quotes and trim
+            firstChunk = firstChunk.replace(/^['\"]|['\"]$/g, '').trim();
+
+            // Enforce maximum length (300 chars) and try to trim to end of sentence
+            if (firstChunk.length > 300) {
+                let truncated = firstChunk.substring(0, 300);
+                try {
+                    truncated = trimToEndSentence(truncated);
+                } catch (e) {
+                    // If trimToEndSentence fails, fallback to simple truncation
+                    truncated = truncated.trim();
+                }
+                firstChunk = truncated;
+            }
+
+            return firstChunk;
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] clean_summary_output error:`, e);
+            try { toastr.error(`Summary cleaning failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+            return '';
+        }
+    }
+    
+    // Build context block from previous message's summary for better summarization accuracy
+    // This helps the model understand references and pronouns in the current message
+    build_context_block(currentIndex, ctx) {
+        try {
+            // No context for first message
+            if (currentIndex <= 0) {
+                return '';
+            }
+
+            const chat = ctx.chat;
+
+            // Look for the previous non-system message
+            let prevIndex = currentIndex - 1;
+            while (prevIndex >= 0 && chat[prevIndex]?.is_system) {
+                prevIndex--;
+            }
+
+            if (prevIndex < 0) {
+                return '';  // No previous non-system message found
+            }
+
+            const prevMessage = chat[prevIndex];
+            const prevSummary = get_memory(prevMessage);
+
+            if (!prevSummary) {
+                debug(`No previous summary available for context (message ${prevIndex})`);
+                return '';  // No summary available for previous message
+            }
+
+            // Build the context block with clear labeling
+            const contextBlock = `[PREVIOUS MESSAGE CONTEXT - Reference Only]
+            DO NOT include this section in your summary. This is background context only.
+            
+            Previous message summary: ${prevSummary}
+            
+            [END CONTEXT - Now summarize the message below]
+            
+            `;
+
+            debug(`Added context from message ${prevIndex}: "${prevSummary.substring(0, 50)}..."`);
+            return contextBlock;
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] build_context_block error:`, e);
+            try { toastr.error(`Context build failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+            return '';
+        }
     }
     
     async summarize_message(index) {
@@ -2572,54 +3413,237 @@ class SummaryQueue {
             return;
         }
         
-        debug(`Summarizing message ${index}...`);
-        
-        // Create summary prompt with placeholders
-        const prompt_template = get_settings('summary_prompt');
-        const max_words = get_settings('summary_max_words') || 50;
-        
-        let prompt = prompt_template
-            .replace(/\{\{message\}\}/g, message.mes)
-            .replace(/\{\{words\}\}/g, max_words)
-            .replace(/\{\{user\}\}/g, ctx.name1 || 'User')
-            .replace(/\{\{char\}\}/g, ctx.name2 || 'Character');
-        
-        // Generate summary using connection profile
-        try {
-            const profile_id = get_summary_connection_profile();
-            
-            // Create messages array for the request
-            const messages = [{
-                role: 'system',
-                content: prompt
-            }];
-            
-            // Use ConnectionManagerRequestService to send with specific profile
-            debug(`Using profile ${profile_id} for summarization`);
-            const result = await ctx.ConnectionManagerRequestService.sendRequest(profile_id, messages);
-            
-            if (result && result.content) {
-                let summary = result.content.trim();
-                
-                // Trim incomplete sentences if enabled
-                if (ctx.powerUserSettings.trim_sentences) {
-                    summary = trimToEndSentence(summary);
-                }
-                
-                // Store summary
-                set_data(message, 'memory', summary);
-                set_data(message, 'needs_summary', false);
-                set_data(message, 'hash', getStringHash(message.mes));
-                
-                debug(`Summarized message ${index}: "${summary}"`);
-            }
-        } catch (e) {
-            error(`Failed to summarize message ${index}:`, e);
-            set_data(message, 'error', String(e));
+        // Check if stopped before starting
+        if (this.stopped) {
+            debug(`Summarization stopped, skipping message ${index}`);
+            return;
         }
         
-        // Refresh memory after summarization
-        refresh_memory();
+        debug(`Summarizing message ${index}...`);
+        
+        // Summarization no longer switches global connection profile;
+        // it uses summary_endpoint_url (if set) or falls back to generateRaw().
+        
+        try {
+            // Create summary prompt with placeholders
+            const prompt_template = get_settings('summary_prompt');
+            const max_words = get_settings('summary_max_words') || 50;
+            
+            // Determine the likely speaker for the prefill
+            const speakerLabel = message.is_user
+                ? (ctx.name1 || 'User') + ':'
+                : (ctx.name2 || 'Character') + ':';
+            
+            // === CONTEXT INJECTION ===
+            // Get previous message's summary for context (helps with references/pronouns)
+            let contextBlock = '';
+            try {
+                const cb = this.build_context_block(index, ctx);
+                contextBlock = (typeof cb === 'string') ? cb : '';
+                if (!contextBlock && cb) {
+                    debug(`build_context_block returned non-string for message ${index}, ignoring`);
+                }
+            } catch (e) {
+                console.error(`[${MODULE_NAME_FANCY}] build_context_block threw:`, e);
+                try { toastr.error(`Context build failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                contextBlock = '';
+            }
+
+            let prompt = prompt_template
+                .replace(/\{\{message\}\}/g, message.mes)
+                .replace(/\{\{words\}\}/g, max_words)
+                .replace(/\{\{user\}\}/g, ctx.name1 || 'User')
+                .replace(/\{\{char\}\}/g, ctx.name2 || 'Character')
+                .replace(/\{\{context_block\}\}/g, contextBlock);
+            
+            // Generate summary using configured summary endpoint (if set) or generateRaw
+            try {
+                // Wait for any previous generation to complete
+                while (this._currentlyGenerating && !this.stopped) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                if (this.stopped) {
+                    debug(`Summarization stopped while waiting for previous generation for message ${index}`);
+                    return;
+                }
+
+                this._currentlyGenerating = true;
+
+                // Create new AbortController for this generation
+                this.abortController = new AbortController();
+
+                // Check stopped BEFORE making the API call
+                if (this.stopped) {
+                    debug(`Summarization stopped before API call for message ${index}`);
+                    this.abortController = null;
+                    this._currentlyGenerating = false;
+                    return;
+                }
+
+                debug(`Generating summary for message ${index}`);
+                debug_trunc(`[${MODULE_NAME_FANCY}] Using ${get_settings('summary_endpoint_url') ? 'summary endpoint' : 'generateRaw'} for message ${index}`);
+
+                // Prefer external summary endpoint when configured (REQ-003)
+                let result = null;
+                try {
+                    if (get_settings('summary_endpoint_url')) {
+                        // Delegate retry/backoff to call_summary_endpoint which implements exponential backoff + retries
+                        result = await call_summary_endpoint(prompt, { signal: this.abortController.signal });
+                    } else {
+                        result = await generateRaw({
+                            prompt: prompt,
+                            // Note: generateRaw doesn't support abortSignal directly,
+                            // but we check this.stopped before and after the call
+                        });
+                    }
+                } catch (callErr) {
+                    // If the call was aborted by the user, treat as a non-error and exit quietly
+                    const wasAborted = this.stopped || (this.abortController && this.abortController.signal && this.abortController.signal.aborted) || (callErr && (callErr.name === 'AbortError' || (callErr.message && callErr.message.toLowerCase().includes('abort')) || (callErr.message && callErr.message.toLowerCase().includes('request aborted'))));
+
+                    this.abortController = null;
+
+                    if (wasAborted) {
+                        debug(`Summarization aborted/stopped for message ${index}`);
+                        return; // Don't mark message as error when user aborted
+                    }
+
+                    // Non-abort errors should be recorded on the message and surfaced
+                    console.error(`[${MODULE_NAME_FANCY}] Summarization generation failed for message ${index}:`, callErr);
+                    set_data(message, 'error', String(callErr));
+                    try { toastr.error(`Summarization generation failed for message ${index}: ${callErr.message || String(callErr)}`, MODULE_NAME_FANCY); } catch (t) {}
+                    return;
+                }
+
+                // Check if stopped during generation
+                if (this.stopped) {
+                    debug(`Summarization stopped during generation of message ${index}`);
+                    this.abortController = null;
+                    this._currentlyGenerating = false;
+                    return;
+                }
+
+                this.abortController = null;
+
+                if (result) {
+                    // Normalize result to a string (handles both fetch text and structured objects)
+                    const raw = (typeof result === 'string') ? result : (result?.toString?.() || '');
+                    let rawSummary = raw;
+
+                    // V33: Validation loop with max 3 attempts
+                    const maxWords = get_settings('summary_max_words') || 50;
+                    let validationAttempt = 0;
+                    const maxValidationAttempts = 3;
+                    let finalSummary = null;
+                    let lastValidationReason = null;
+
+                    while (validationAttempt < maxValidationAttempts && !this.stopped) {
+                        validationAttempt++;
+                        
+                        // On first attempt, use the result we already have
+                        // On subsequent attempts, regenerate
+                        let summaryToValidate;
+                        if (validationAttempt === 1) {
+                            summaryToValidate = this.clean_summary_output(rawSummary);
+                        } else {
+                            debug_trunc(`Validation retry ${validationAttempt}/${maxValidationAttempts} for message ${index}`);
+                            
+                            // Regenerate with doubled tokens on retry
+                            const retryTokens = (get_settings('summary_max_tokens') || 500) * 2;
+                            try {
+                                let retryResult;
+                                if (get_settings('summary_endpoint_url')) {
+                                    retryResult = await call_summary_endpoint(prompt, {
+                                        signal: this.abortController?.signal,
+                                        maxTokensOverride: retryTokens
+                                    });
+                                } else {
+                                    retryResult = await generateRaw({ prompt: prompt });
+                                }
+                                
+                                if (!retryResult) continue;
+                                summaryToValidate = this.clean_summary_output(retryResult);
+                            } catch (retryErr) {
+                                debug_trunc(`Retry generation failed: ${retryErr.message}`);
+                                continue;
+                            }
+                        }
+                        
+                        // If cleaning removed the speaker label, add it back
+                        if (summaryToValidate && !summaryToValidate.includes(':')) {
+                            summaryToValidate = speakerLabel + ' ' + summaryToValidate;
+                        }
+                        
+                        // Validate the summary
+                        const validation = validate_summary(summaryToValidate, ctx, maxWords);
+                        
+                        if (validation.valid) {
+                            // Trim incomplete sentences if enabled
+                            if (ctx.powerUserSettings?.trim_sentences) {
+                                summaryToValidate = trimToEndSentence(summaryToValidate);
+                            }
+                            
+                            // Final length enforcement
+                            if (summaryToValidate.length > 300) {
+                                summaryToValidate = summaryToValidate.substring(0, 300);
+                                summaryToValidate = trimToEndSentence(summaryToValidate);
+                            }
+                            
+                            finalSummary = summaryToValidate;
+                            break;
+                        } else {
+                            lastValidationReason = validation.reason;
+                            debug_trunc(`Validation failed (attempt ${validationAttempt}): ${validation.reason}`);
+                        }
+                    }
+
+                    // Handle result
+                    if (finalSummary) {
+                        // Store summary
+                        set_data(message, 'memory', finalSummary);
+                        set_data(message, 'needs_summary', false);
+                        set_data(message, 'hash', getStringHash(message.mes));
+                        
+                        debug(`Summarized message ${index}: "${finalSummary}"`);
+                    } else {
+                        // All attempts failed - mark for manual review and log if debug enabled
+                        set_data(message, 'needs_manual_review', true);
+                        set_data(message, 'needs_summary', true);  // Keep in pending state
+                        
+                        if (get_settings('debug_truncation')) {
+                            const preview = message.mes.substring(0, 100) + (message.mes.length > 100 ? '...' : '');
+                            console.log(`[${MODULE_NAME_FANCY}][Truncation] Summary validation failed for message ${index} after ${maxValidationAttempts} attempts`);
+                            console.log(`  Last attempt reason: ${lastValidationReason}`);
+                            console.log(`  Message preview: ${preview}`);
+                        }
+                        
+                        debug(`Dropped summary for message ${index} after ${maxValidationAttempts} failed attempts`);
+                    }
+                }
+                
+                // Release lock after successful completion
+                this._currentlyGenerating = false;
+            } catch (e) {
+                // Any unexpected errors here should be surfaced and recorded
+                const aborted = this.stopped || (this.abortController && this.abortController.signal && this.abortController.signal.aborted) || (e && (e.name === 'AbortError' || (e.message && e.message.toLowerCase().includes('abort'))));
+                if (aborted) {
+                    debug(`Summarization aborted/stopped for message ${index}`);
+                } else {
+                    console.error(`[${MODULE_NAME_FANCY}]`, `Failed to summarize message ${index}:`, e);
+                    set_data(message, 'error', String(e));
+                    try { toastr.error(`Summarization failed for message ${index}: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (toastErr) { console.error(`[${MODULE_NAME_FANCY}] toastr error:`, toastErr); }
+                }
+
+                this.abortController = null;
+                this._currentlyGenerating = false;  // Release lock on error
+            }
+            
+            // Refresh memory after summarization (unless stopped)
+            if (!this.stopped) {
+                refresh_memory();
+            }
+        } finally {
+        }
     }
 }
 
@@ -2636,9 +3660,16 @@ async function auto_summarize_chat() {
     
     debug('Auto-summarizing chat...');
     
-    // Find messages that need summaries
+    // Find messages that need summaries (respecting delay window)
     const to_summarize = [];
+    const summarization_delay = get_settings('summarization_delay');
+    const delay_threshold = chat.length - summarization_delay;
+
     for (let i = 0; i < chat.length; i++) {
+        // Skip messages within delay window
+        if (i >= delay_threshold) {
+            continue;
+        }
         if (get_data(chat[i], 'needs_summary')) {
             to_summarize.push(i);
         }
@@ -2675,7 +3706,7 @@ function register_event_listeners() {
             // Clear Qdrant memories for new chat (these are transient, not persisted)
             CURRENT_QDRANT_MEMORIES = [];
             CURRENT_QDRANT_INJECTION = '';
-            // NOTE: QDRANT_TOKEN_HISTORY and DELETION_COUNT are now loaded from chat_metadata
+            // NOTE: QDRANT_TOKEN_HISTORY is now loaded from chat_metadata
             // by load_truncation_index() - no manual reset needed
         }
         currentChatId = newChatId;
@@ -2684,7 +3715,6 @@ function register_event_listeners() {
         snapshot_chat_state();
         
         refresh_memory();
-        update_resilience_ui();
         
         // Update UI with loaded state immediately (don't wait for generation)
         update_overview_tab();
@@ -2703,10 +3733,10 @@ function register_event_listeners() {
     // Auto-summarize and auto-buffer on new character messages
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (id) => {
         if (streamingProcessor && !streamingProcessor.isFinished) return;
-        
-        // Auto-summarize (don't await - runs in background)
-        auto_summarize_chat();
-        
+
+        // Auto-summarize (delay to avoid interfering with message generation)
+        setTimeout(() => auto_summarize_chat(), 500);
+
         // Auto-buffer for Qdrant (if enabled)
         const ctx = getContext();
         if (id !== undefined && ctx.chat[id]) {
@@ -2715,19 +3745,38 @@ function register_event_listeners() {
                 buffer_message(id, message.mes, false);  // false = character message
             }
         }
-        
+
         // Vectorize delayed messages that are now outside the delay window
         vectorize_delayed_messages();
-        
+
         // Delay status update to ensure itemizedPrompts is populated
-        setTimeout(() => update_status_display(), 100);
+        setTimeout(async () => {
+            // Refresh Qdrant memories and vector statistics after each message
+            if (get_settings('qdrant_enabled')) {
+                try {
+                    await refresh_qdrant_memories(false);
+                } catch (e) {
+                    debug_qdrant('Failed to refresh Qdrant memories (CHARACTER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh Qdrant memories: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+
+                try {
+                    await refresh_vector_statistics();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh vector statistics (CHARACTER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+            }
+
+            update_status_display();
+        }, 100);
     });
 
     // Auto-summarize and auto-buffer on new user messages
     eventSource.on(event_types.USER_MESSAGE_RENDERED, (id) => {
-        // Auto-summarize (don't await - runs in background)
-        auto_summarize_chat();
-        
+        // Auto-summarize (delay to avoid interfering with message generation)
+        setTimeout(() => auto_summarize_chat(), 500);
+
         // Auto-buffer for Qdrant (if enabled)
         const ctx = getContext();
         if (id !== undefined && ctx.chat[id]) {
@@ -2736,12 +3785,31 @@ function register_event_listeners() {
                 buffer_message(id, message.mes, true);  // true = user message
             }
         }
-        
+
         // Vectorize delayed messages that are now outside the delay window
         vectorize_delayed_messages();
-        
+
         // Delay status update to ensure itemizedPrompts is populated
-        setTimeout(() => update_status_display(), 100);
+        setTimeout(async () => {
+            // Refresh Qdrant memories and vector statistics after each message
+            if (get_settings('qdrant_enabled')) {
+                try {
+                    await refresh_qdrant_memories(false);
+                } catch (e) {
+                    debug_qdrant('Failed to refresh Qdrant memories (USER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh Qdrant memories: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+ 
+                try {
+                    await refresh_vector_statistics();
+                } catch (e) {
+                    debug_qdrant('Failed to refresh vector statistics (USER_MESSAGE_RENDERED handler):', e);
+                    try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+                }
+            }
+ 
+            update_status_display();
+        }, 100);
     });
 }
 
@@ -2787,9 +3855,36 @@ function initialize_ui_listeners() {
     // ==================== TRUNCATION SETTINGS ====================
     bind_setting('#ct_enabled', 'enabled', 'boolean');
     bind_setting('#ct_target_size', 'target_context_size', 'number');
-    bind_setting('#ct_auto_summarize', 'auto_summarize', 'boolean');
-    bind_setting('#ct_connection_profile', 'connection_profile', 'text');
     
+    // Auto-limit summaries toggle (V22)
+    bind_setting('#ct_auto_limit_summaries', 'auto_limit_summaries', 'boolean');
+    
+    // Show/hide manual slider based on auto toggle
+    $('#ct_auto_limit_summaries').on('change', function() {
+        const autoEnabled = $(this).prop('checked');
+        $('#ct_manual_summary_limit').toggle(!autoEnabled);
+        update_auto_limit_display();
+    });
+    
+    // Manual slider (only used when auto is disabled)
+    bind_range_setting('#ct_max_summary_injection_tokens', 'max_summary_injection_tokens', '#ct_max_summary_injection_tokens_display');
+    
+    // Initialize visibility
+    $('#ct_manual_summary_limit').toggle(!get_settings('auto_limit_summaries'));
+    
+    // Update calculated value display
+    update_auto_limit_display();
+    
+    // Also update when target_utilization changes
+    $('#ct_target_utilization').on('change', update_auto_limit_display);
+    
+    bind_setting('#ct_auto_summarize', 'auto_summarize', 'boolean');
+    bind_setting('#ct_summary_endpoint_url', 'summary_endpoint_url', 'text');
+    bind_setting('#ct_summary_endpoint_api_key', 'summary_endpoint_api_key', 'text');
+    bind_range_setting('#ct_summary_timeout', 'summary_endpoint_timeout', '#ct_summary_timeout_display');
+    bind_range_setting('#ct_summary_delay', 'summary_request_delay', '#ct_summary_delay_display');
+    bind_setting('#ct_summary_retries', 'summary_max_retries', 'number');
+
     // Per-module debug settings
     bind_setting('#ct_debug_truncation', 'debug_truncation', 'boolean');
     
@@ -2806,21 +3901,53 @@ function initialize_ui_listeners() {
     
     // Min messages (now a slider)
     bind_range_setting('#ct_min_keep', 'min_messages_to_keep', '#ct_min_keep_display');
+
+    // Summarization delay (new slider)
+    bind_range_setting('#ct_summarization_delay', 'summarization_delay', '#ct_summarization_delay_display');
     
     // Max words per summary (now a slider)
     bind_range_setting('#ct_max_words', 'summary_max_words', '#ct_max_words_display');
     
-    // Initialize connection profile dropdown
-    update_connection_profile_dropdown();
+    // Connection profile dropdown removed — summarization uses independent summary_endpoint_url
     
-    // Reset button
-    $('#ct_reset').on('click', () => {
+    // Reset All button (combines reset truncation + reset calibration)
+    $('#ct_reset_all').on('click', () => {
         reset_truncation_index();
-        toastr.info('Truncation index reset', MODULE_NAME_FANCY);
+        reset_calibration();
+        
+        // Show status message
+        const $status = $('#ct_reset_all_status');
+        $status.text('✓ Reset complete - truncation and calibration cleared')
+               .removeClass('ct_status_error')
+               .addClass('ct_status_success')
+               .show();
+        
+        // Auto-hide after 10 seconds
+        setTimeout(() => {
+            $status.fadeOut();
+        }, 10000);
     });
     
-    // Summarize all button
+    // Force Recalibrate button - resets ONLY the correction factor (not truncation index)
+    $('#ct_force_recalibrate').on('click', () => {
+        CHAT_TOKEN_CORRECTION_FACTOR = 1.0;
+        CALIBRATION_STATE = 'INITIAL_TRAINING';
+        GENERATION_COUNT = 0;
+        STABLE_COUNT = 0;
+        save_truncation_index();
+        update_calibration_ui();
+        update_overview_tab();
+        toastr.info('Correction factor reset to 1.0 - will recalibrate on next generation', MODULE_NAME_FANCY);
+    });
+    
+    // Summarize all button (toggles between start and stop)
     $('#ct_summarize_all').on('click', async () => {
+        // If already active, stop
+        if (summaryQueue.active) {
+            summaryQueue.stop();
+            return;
+        }
+        
         const ctx = getContext();
         const chat = ctx.chat;
         const indexes = [];
@@ -2832,17 +3959,10 @@ function initialize_ui_listeners() {
         }
         
         if (indexes.length > 0) {
-            toastr.info(`Summarizing ${indexes.length} messages...`, MODULE_NAME_FANCY);
             await summaryQueue.summarize(indexes);
-            toastr.success('Summarization complete', MODULE_NAME_FANCY);
         } else {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
         }
-    });
-    
-    // Stop summarize button
-    $('#ct_stop_summarize').on('click', () => {
-        summaryQueue.stop();
     });
     
     // ==================== AUTO-CALIBRATION SETTINGS ====================
@@ -2905,8 +4025,16 @@ function initialize_ui_listeners() {
     
     // Qdrant action buttons
     $('#ct_qdrant_test').on('click', test_qdrant_connection);
+    $('#ct_summary_endpoint_test').on('click', test_summary_endpoint);
     $('#ct_test_embedding').on('click', test_embedding);
-    $('#ct_index_chats').on('click', index_current_chat);
+    // Index button toggles between start and stop
+    $('#ct_index_chats').on('click', () => {
+        if (INDEXING_ACTIVE) {
+            stop_indexing();
+        } else {
+            index_current_chat();
+        }
+    });
     $('#ct_delete_collection').on('click', delete_current_collection);
     
     // Memory panel toggle
@@ -2915,54 +4043,77 @@ function initialize_ui_listeners() {
     // Qdrant debug setting
     bind_setting('#ct_debug_qdrant', 'debug_qdrant', 'boolean');
     
-    // ==================== SYNERGY SETTINGS ====================
-    bind_setting('#ct_use_summaries_for_qdrant', 'use_summaries_for_qdrant', 'boolean');
-    bind_setting('#ct_memory_aware_summaries', 'memory_aware_summaries', 'boolean');
+    // ==================== SIMPLE CHUNK SETTINGS ====================
+    bind_range_setting('#ct_chunk_min_size', 'chunk_min_size', '#ct_chunk_min_display');
+    bind_range_setting('#ct_chunk_max_size', 'chunk_max_size', '#ct_chunk_max_display');
     bind_setting('#ct_account_qdrant_tokens', 'account_qdrant_tokens', 'boolean');
     
-    // Synergy debug setting
-    bind_setting('#ct_debug_synergy', 'debug_synergy', 'boolean');
-    
     // ==================== OVERVIEW TAB QUICK ACTIONS ====================
-    $('#ct_ov_reset').on('click', () => {
+    $('#ct_ov_reset_all').on('click', () => {
         reset_truncation_index();
-        toastr.info('Truncation index reset', MODULE_NAME_FANCY);
-    });
-    
-    $('#ct_ov_recalibrate').on('click', () => {
         reset_calibration();
+        
+        // Show status message
+        const $status = $('#ct_ov_reset_all_status');
+        $status.text('✓ Reset complete - truncation and calibration cleared')
+               .removeClass('ct_status_error')
+               .addClass('ct_status_success')
+               .show();
+        
+        // Auto-hide after 10 seconds
+        setTimeout(() => {
+            $status.fadeOut();
+        }, 10000);
     });
     
+    // Overview summarize button (toggles between start and stop)
     $('#ct_ov_summarize').on('click', async () => {
+        debug_trunc('Overview Summarize button clicked');
+
+        // If already active, stop
+        if (summaryQueue.active) {
+            debug_trunc('SummaryQueue active - stopping');
+            summaryQueue.stop();
+            return;
+        }
+
         const ctx = getContext();
-        const chat = ctx.chat;
+        const chat = ctx.chat || [];
+
+        if (!chat || chat.length === 0) {
+            debug_trunc('No chat messages available to summarize');
+            toastr.info('No messages to summarize', MODULE_NAME_FANCY);
+            return;
+        }
+
         const indexes = [];
-        
+
         for (let i = 0; i < chat.length; i++) {
             if (!chat[i].is_system && !get_memory(chat[i])) {
                 indexes.push(i);
             }
         }
-        
-        if (indexes.length > 0) {
-            toastr.info(`Summarizing ${indexes.length} messages...`, MODULE_NAME_FANCY);
-            await summaryQueue.summarize(indexes);
-            toastr.success('Summarization complete', MODULE_NAME_FANCY);
-        } else {
+
+        debug_trunc(`Found ${indexes.length} messages to summarize`);
+
+        if (indexes.length === 0) {
             toastr.info('All messages already summarized', MODULE_NAME_FANCY);
+            return;
         }
-    });
-    
-    // Stop summarize button (Overview tab)
-    $('#ct_ov_stop_summarize').on('click', () => {
-        summaryQueue.stop();
+
+        try {
+            await summaryQueue.summarize(indexes);
+        } catch (e) {
+            console.error(`[${MODULE_NAME_FANCY}] Summarize all failed:`, e);
+            toastr.error(`Summarization failed: ${e.message || String(e)}`, MODULE_NAME_FANCY);
+        }
     });
     
     // Overview memory panel toggle
     $('#ct_ov_memory_toggle').on('click', function() {
         const $content = $('#ct_ov_memory_list');
         const isExpanded = $content.is(':visible');
-        
+
         if (isExpanded) {
             $content.slideUp(200);
             $(this).removeClass('expanded');
@@ -2971,6 +4122,8 @@ function initialize_ui_listeners() {
             $(this).addClass('expanded');
         }
     });
+
+
     
     // ==================== TOKEN COUNTS TOGGLE ====================
     $('#ct_breakdown_toggle').on('click', function() {
@@ -3156,6 +4309,34 @@ function bind_range_setting_percent(selector, key, displaySelector) {
     });
 }
 
+// Bind range input with float display (for V10 settings like temporal_midpoint)
+function bind_range_setting_float(selector, key, displaySelector, decimals = 2) {
+    const $element = $(selector);
+    const $display = $(displaySelector);
+    
+    if ($element.length === 0) {
+        error(`No element found for selector [${selector}]`);
+        return;
+    }
+    
+    // Set initial value
+    const initialValue = get_settings(key);
+    $element.val(initialValue);
+    $display.text(initialValue.toFixed(decimals));
+    
+    // Listen for input (live update) and change (final value)
+    $element.on('input', function() {
+        const value = parseFloat($(this).val());
+        $display.text(value.toFixed(decimals));
+    });
+    
+    $element.on('change', function() {
+        const value = parseFloat($(this).val());
+        debug(`Setting [${key}] changed to [${value}]`);
+        set_settings(key, value);
+    });
+}
+
 // Initialize memory panel toggle
 function initialize_memory_panel_toggle() {
     const $header = $('#ct_memory_panel_toggle');
@@ -3200,6 +4381,11 @@ async function test_qdrant_connection() {
             $status.removeClass().addClass('ct_status_message ct_status_success')
                 .text(`Connected! ${collectionCount} collection(s) found`);
             debug_qdrant(`Connection successful: ${collectionCount} collections`);
+            
+            // VIS-003: Auto-clear status after 10 seconds
+            setTimeout(() => {
+                $status.text('').removeClass('ct_status_success ct_status_error ct_status_info');
+            }, 10000);
         } else {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -3207,8 +4393,211 @@ async function test_qdrant_connection() {
         $status.removeClass().addClass('ct_status_message ct_status_error')
             .text(`Connection failed: ${e.message}`);
         error('Qdrant connection test failed:', e);
+        
+        // VIS-003: Auto-clear status after 10 seconds
+        setTimeout(() => {
+            $status.text('').removeClass('ct_status_success ct_status_error ct_status_info');
+        }, 10000);
     }
 }
+// Test Summary Endpoint (OpenAI-compatible)
+async function test_summary_endpoint() {
+    const $status = $('#ct_summary_endpoint_status');
+    const $button = $('#ct_summary_endpoint_test');
+
+    // Read values from UI or fallback to settings
+    const urlInput = ($('#ct_summary_endpoint_url').length ? $('#ct_summary_endpoint_url').val() : null) || get_settings('summary_endpoint_url');
+    const apiKeyInput = ($('#ct_summary_endpoint_api_key').length ? $('#ct_summary_endpoint_api_key').val() : null) || get_settings('summary_endpoint_api_key');
+
+    if (!urlInput) {
+        $status.removeClass().addClass('ct_status_message ct_status_error').text('Invalid URL');
+        return;
+    }
+
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(urlInput);
+    } catch (e) {
+        $status.removeClass().addClass('ct_status_message ct_status_error').text('Invalid URL');
+        return;
+    }
+
+    $status.removeClass().addClass('ct_status_message ct_status_info').text('Testing connection...');
+    $button.prop('disabled', true);
+
+    // We'll reuse the same parsing logic used by call_summary_endpoint to ensure parity
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKeyInput) headers['Authorization'] = `Bearer ${apiKeyInput}`;
+
+    const body = JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+            { role: 'system', content: 'You are a helpful assistant. Respond directly without showing your thinking process.' },
+            { role: 'user', content: 'Confirm you are connected with a friendly greeting. Maximum 3 words.' }
+        ],
+        max_tokens: 20,
+        temperature: 0.7
+    });
+
+    try {
+        const resp = await fetch(parsedUrl.toString(), {
+            method: 'POST',
+            headers: headers,
+            body: body,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeout);
+
+        if (resp.ok) {
+            let dataText = '';
+            try {
+                const data = await resp.json();
+                dataText = extract_model_content(data);
+            } catch (e) {
+                // Not JSON or unexpected shape
+                const text = await resp.text();
+                dataText = text;
+            }
+
+            if (dataText && dataText.toString().trim().length > 0) {
+                const sample = dataText.toString().trim().substring(0, 120);
+                $status.removeClass().addClass('ct_status_message ct_status_success').text(`Connected! Sample reply: "${sample}"`);
+            } else {
+                $status.removeClass().addClass('ct_status_message ct_status_error').text('Unexpected response shape');
+            }
+
+        } else if (resp.status === 401 || resp.status === 403) {
+            $status.removeClass().addClass('ct_status_message ct_status_error').text(`Authentication failed (HTTP ${resp.status})`);
+        } else {
+            $status.removeClass().addClass('ct_status_message ct_status_error').text(`Connection failed: HTTP ${resp.status}: ${resp.statusText}`);
+        }
+    } catch (e) {
+        clearTimeout(timeout);
+        if (e.name === 'AbortError') {
+            $status.removeClass().addClass('ct_status_message ct_status_error').text('Connection timed out (10s)');
+        } else if (e instanceof TypeError) {
+            $status.removeClass().addClass('ct_status_message ct_status_error').text(`Network/CORS error: ${e.message}`);
+        } else {
+            $status.removeClass().addClass('ct_status_message ct_status_error').text(`Error: ${e.message || String(e)}`);
+        }
+    } finally {
+        $button.prop('disabled', false);
+    }
+}
+
+
+// Call summary endpoint (OpenAI-compatible). Returns the raw model output as string.
+function extract_model_content(data) {
+    if (!data) return '';
+    return (data?.choices && data.choices[0]) ? (data.choices[0].message?.content || data.choices[0].text) : (data?.text || '');
+}
+
+async function call_summary_endpoint(prompt, options = {}) {
+    const { signal = null, attempt = 0, maxTokensOverride = null } = options;
+    const url = get_settings('summary_endpoint_url');
+    const apiKey = get_settings('summary_endpoint_api_key');
+    const maxRetries = get_settings('summary_max_retries') || 3;
+
+    if (!url) throw new Error('No summary endpoint configured');
+
+    let parsed;
+    try { parsed = new URL(url); } catch (e) { throw new Error('Invalid summary endpoint URL'); }
+
+    const controller = new AbortController();
+    // NO TIMEOUT - wait indefinitely for LLM response
+    // AbortController is ONLY used for user-initiated Stop button
+    
+    // Link external abort signal (from Stop button) to our controller
+    if (signal) {
+        signal.addEventListener('abort', () => controller.abort());
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const body = JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+            { role: 'system', content: 'You are a helpful assistant. Respond directly without showing your thinking process.' },
+            { role: 'user', content: prompt }
+        ],
+        max_tokens: maxTokensOverride || get_settings('summary_max_tokens') || 800,
+        temperature: 0.2,
+        thinking: { type: 'disabled' }  // GLM-4: Disable deep thinking mode to prevent <think> blocks
+        // NOTE: The `thinking` parameter is GLM-4 specific but harmless for other APIs.
+        // - GLM-4 models via TabbyAPI: Prevents ~400+ token <think> blocks from consuming token budget
+        // - OpenAI/Anthropic/other APIs: Silently ignored (not part of their API spec)
+        // - Fallback defense: clean_summary_output() strips any <think> blocks that slip through
+        // Without this, GLM-4.5 Air exhausts the 800 token budget with thinking, truncating summaries mid-sentence
+    });
+
+    try {
+        const resp = await fetch(parsed.toString(), {
+            method: 'POST',
+            headers,
+            body,
+            signal: controller.signal
+        });
+
+        // Handle retryable errors
+        if (resp.status === 503 || resp.status === 429) {
+            if (attempt < maxRetries) {
+                const backoffMs = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+                debug_trunc(`HTTP ${resp.status}, retry ${attempt + 1}/${maxRetries} after ${Math.round(backoffMs)}ms`);
+                
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+                
+                // Check if aborted during backoff
+                if (signal?.aborted) {
+                    throw new Error('Aborted during retry backoff');
+                }
+                
+                return call_summary_endpoint(prompt, { signal, attempt: attempt + 1 });
+            }
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status} after ${maxRetries} retries: ${text}`);
+        }
+
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+        }
+
+        let data;
+        try { data = await resp.json(); } catch (e) {
+            const txt = await resp.text();
+            return txt;
+        }
+
+        const content = extract_model_content(data);
+        
+        // Retry on empty response
+        if (!content || content.trim().length === 0) {
+            if (attempt < maxRetries) {
+                const backoffMs = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+                debug_trunc(`Empty response, retry ${attempt + 1}/${maxRetries} after ${Math.round(backoffMs)}ms`);
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+                if (signal?.aborted) throw new Error('Aborted during retry backoff');
+                return call_summary_endpoint(prompt, { signal, attempt: attempt + 1 });
+            }
+            throw new Error('Empty response after max retries');
+        }
+        
+        return content;
+        
+    } catch (e) {
+        if (e.name === 'AbortError') {
+            throw new Error('Request aborted by user');
+        }
+        if (e instanceof TypeError) throw new Error(`Network/CORS error: ${e.message}`);
+        throw e;
+    }
+}
+
 
 // Test embedding endpoint
 async function test_embedding() {
@@ -3235,6 +4624,11 @@ async function test_embedding() {
             $status.removeClass().addClass('ct_status_message ct_status_success')
                 .text(`Success! Dimensions: ${embedding.length}`);
             debug_qdrant(`Embedding test successful: ${embedding.length} dimensions`);
+            
+            // VIS-003: Auto-clear status after 10 seconds
+            setTimeout(() => {
+                $status.text('').removeClass('ct_status_success ct_status_error ct_status_info');
+            }, 10000);
         } else {
             throw new Error('Empty embedding returned');
         }
@@ -3242,11 +4636,16 @@ async function test_embedding() {
         $status.removeClass().addClass('ct_status_message ct_status_error')
             .text(`Embedding failed: ${e.message}`);
         error('Embedding test failed:', e);
+        
+        // VIS-003: Auto-clear status after 10 seconds
+        setTimeout(() => {
+            $status.text('').removeClass('ct_status_success ct_status_error ct_status_info');
+        }, 10000);
     }
 }
 
 // Generate embedding using KoboldCPP/local endpoint (OpenAI-compatible format)
-async function generate_embedding(text) {
+async function generate_embedding(text, signal = null) {
     const url = get_settings('embedding_url');
     const apiKey = get_settings('embedding_api_key');
     
@@ -3262,34 +4661,80 @@ async function generate_embedding(text) {
         headers['Authorization'] = `Bearer ${apiKey}`;
     }
     
-    // OpenAI-compatible embedding request format
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify({
-            input: text,
-            model: 'text-embedding'  // KoboldCPP ignores this but it's required for format
-        })
-    });
+    const MAX_RETRIES = 3;
+    const BASE_DELAY = 1000; // 1 second
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            // OpenAI-compatible embedding request format
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    input: text,
+                    model: 'text-embedding'  // KoboldCPP ignores this but it's required for format
+                }),
+                signal: signal
+            });
+            
+            if (!response.ok) {
+                // Check if it's a retryable error (503 Service Unavailable)
+                if (response.status === 503 && attempt < MAX_RETRIES) {
+                    const delay = BASE_DELAY * Math.pow(2, attempt);
+                    debug_qdrant(`Embedding endpoint 503 error, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                    await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(resolve, delay);
+                        if (signal) {
+                            signal.addEventListener('abort', () => {
+                                clearTimeout(timeout);
+                                reject(new DOMException('Aborted', 'AbortError'));
+                            }, { once: true });
+                        }
+                    });
+                    continue;
+                }
+                
+                const errorText = await response.text();
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const data = await response.json();
+            
+            // OpenAI format: data.data[0].embedding
+            if (data.data && data.data[0] && data.data[0].embedding) {
+                return data.data[0].embedding;
+            }
+            
+            // Alternative format: data.embedding
+            if (data.embedding) {
+                return data.embedding;
+            }
+            
+            throw new Error('Unexpected embedding response format');
+        } catch (err) {
+            // Check for abort
+            if (err.name === 'AbortError') {
+                throw err;
+            }
+            
+            // Network errors or other exceptions
+            if (attempt < MAX_RETRIES && (err.message.includes('fetch') || err.message.includes('network'))) {
+                const delay = BASE_DELAY * Math.pow(2, attempt);
+                debug_qdrant(`Embedding generation error: ${err.message}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(resolve, delay);
+                    if (signal) {
+                        signal.addEventListener('abort', () => {
+                            clearTimeout(timeout);
+                            reject(new DOMException('Aborted', 'AbortError'));
+                        }, { once: true });
+                    }
+                });
+                continue;
+            }
+            throw err; // Final attempt failed or non-retryable error
+        }
     }
-    
-    const data = await response.json();
-    
-    // OpenAI format: data.data[0].embedding
-    if (data.data && data.data[0] && data.data[0].embedding) {
-        return data.data[0].embedding;
-    }
-    
-    // Alternative format: data.embedding
-    if (data.embedding) {
-        return data.embedding;
-    }
-    
-    throw new Error('Unexpected embedding response format');
 }
 
 // Get the current collection name (may include chat-specific suffix)
@@ -3358,13 +4803,63 @@ async function clear_current_memories() {
     }
 }
 
+// Stop indexing function
+function stop_indexing() {
+    if (!INDEXING_ACTIVE) return;
+    
+    INDEXING_STOPPED = true;
+    
+    // Abort any in-progress async operations
+    if (INDEXING_ABORT_CONTROLLER) {
+        INDEXING_ABORT_CONTROLLER.abort();
+        INDEXING_ABORT_CONTROLLER = null;
+    }
+    
+    // Update button to show stopping state
+    update_indexing_button_state('stopping');
+    
+    debug_qdrant('Indexing stop requested by user');
+    toastr.warning('Stopping indexing...', MODULE_NAME_FANCY);
+}
+
+// Transform indexing button to active/inactive state
+function update_indexing_button_state(state) {
+    const $button = $('#ct_index_chats');
+    
+    if (state === 'active') {
+        $button.addClass('ct_active').removeClass('ct_stopping').prop('disabled', false);
+        $button.find('i').removeClass('fa-database fa-spinner fa-spin').addClass('fa-stop');
+        $button.find('span').text('Stop');
+        $button.removeAttr('title');
+        $button.off('mouseenter.ct_title');
+    } else if (state === 'stopping') {
+        $button.addClass('ct_stopping').removeClass('ct_active').prop('disabled', true);
+        $button.find('i').removeClass('fa-database fa-stop').addClass('fa-spinner fa-spin');
+        $button.find('span').text('Stopping...');
+        $button.removeAttr('title');
+    } else {
+        // inactive
+        $button.removeClass('ct_active ct_stopping').prop('disabled', false);
+        $button.find('i').removeClass('fa-stop fa-spinner fa-spin').addClass('fa-database');
+        $button.find('span').text('Index Chat');
+        $button.off('mouseenter.ct_title').one('mouseenter.ct_title', function() {
+            $(this).attr('title', 'Index all messages from current chat');
+        });
+    }
+}
+
 // Delete current collection entirely
 async function delete_current_collection() {
     const url = get_settings('qdrant_url');
     const collection = get_current_collection_name();
+    const $status = $('#ct_delete_collection_status');
     
     if (!url || !collection) {
-        toastr.error('Qdrant not configured', MODULE_NAME_FANCY);
+        $status.text('✗ Qdrant not configured')
+               .removeClass('ct_status_success')
+               .addClass('ct_status_error')
+               .show();
+        setTimeout(() => { $status.fadeOut(); }, 10000);
         return;
     }
     
@@ -3377,158 +4872,192 @@ async function delete_current_collection() {
         });
         
         if (response.ok) {
-            toastr.success(`Deleted collection "${collection}"`, MODULE_NAME_FANCY);
+            $status.text(`✓ Deleted collection "${collection}"`)
+                   .removeClass('ct_status_error')
+                   .addClass('ct_status_success')
+                   .show();
+            setTimeout(() => { $status.fadeOut(); }, 10000);
             debug_qdrant(`Deleted collection: ${collection}`);
         } else {
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (e) {
-        toastr.error(`Failed to delete collection: ${e.message}`, MODULE_NAME_FANCY);
+        $status.text(`✗ Failed to delete collection: ${e.message}`)
+               .removeClass('ct_status_success')
+               .addClass('ct_status_error')
+               .show();
+        setTimeout(() => { $status.fadeOut(); }, 10000);
         error('Failed to delete collection:', e);
     }
 }
 
 // ==================== MEMORY BUFFER AND CHUNKING ====================
 
-// Memory buffer for accumulating messages before chunking
-class MemoryBuffer {
-    constructor() {
-        this.messages = [];
-        this.currentSize = 0;
-        this.timeoutHandle = null;
-    }
-    
-    // Add a message to the buffer
-    add(messageData) {
-        this.messages.push(messageData);
-        this.currentSize += messageData.text.length;
-        
-        // Reset timeout
-        this.resetTimeout();
-        
-        // Check if we should flush
-        const maxSize = get_settings('chunk_max_size');
-        if (this.currentSize >= maxSize) {
-            return this.flush();
+// ==================== SIMPLE MESSAGE BUFFER (st-qdrant-memory style) ====================
+
+let messageBuffer = [];
+let lastMessageTime = 0;
+let chunkTimer = null;
+
+function getUserDisplayName() {
+    const ctx = getContext();
+    return ctx.name1 || 'User';
+}
+
+function formatDateForChunk(timestamp) {
+    try {
+        const dateObj = new Date(timestamp);
+        if (isNaN(dateObj.getTime())) {
+            throw new Error('Invalid date');
         }
-        
-        return null;
-    }
-    
-    // Reset the flush timeout
-    resetTimeout() {
-        if (this.timeoutHandle) {
-            clearTimeout(this.timeoutHandle);
-        }
-        
-        const timeout = get_settings('chunk_timeout');
-        this.timeoutHandle = setTimeout(() => {
-            const chunk = this.flush();
-            if (chunk) {
-                // Process the chunk asynchronously
-                process_and_store_chunk(chunk).catch(e => {
-                    error('Failed to process chunk on timeout:', e);
-                });
-            }
-        }, timeout);
-    }
-    
-    // Flush the buffer and return a chunk
-    flush() {
-        if (this.messages.length === 0) {
-            return null;
-        }
-        
-        const minSize = get_settings('chunk_min_size');
-        
-        // Don't flush if under minimum size (unless forced)
-        if (this.currentSize < minSize) {
-            debug_qdrant(`Buffer size ${this.currentSize} < min ${minSize}, not flushing`);
-            return null;
-        }
-        
-        // Create chunk from buffered messages
-        const chunk = this.createChunk();
-        
-        // Clear buffer
-        this.messages = [];
-        this.currentSize = 0;
-        
-        if (this.timeoutHandle) {
-            clearTimeout(this.timeoutHandle);
-            this.timeoutHandle = null;
-        }
-        
-        return chunk;
-    }
-    
-    // Force flush regardless of size
-    forceFlush() {
-        if (this.messages.length === 0) {
-            return null;
-        }
-        
-        const chunk = this.createChunk();
-        
-        this.messages = [];
-        this.currentSize = 0;
-        
-        if (this.timeoutHandle) {
-            clearTimeout(this.timeoutHandle);
-            this.timeoutHandle = null;
-        }
-        
-        return chunk;
-    }
-    
-    // Create a chunk from current messages
-    createChunk() {
-        const ctx = getContext();
-        
-        // Combine message texts
-        const texts = this.messages.map(m => {
-            const prefix = m.isUser ? (ctx.name1 || 'User') : (ctx.name2 || 'Character');
-            return `${prefix}: ${m.text}`;
-        });
-        
-        const combinedText = texts.join('\n\n');
-        
-        // Get temporal boundaries
-        const firstMsg = this.messages[0];
-        const lastMsg = this.messages[this.messages.length - 1];
-        
-        return {
-            text: combinedText,
-            messageIndexes: this.messages.map(m => m.index),
-            firstIndex: firstMsg.index,
-            lastIndex: lastMsg.index,
-            timestamp: Date.now(),
-            characterName: ctx.name2 || 'Unknown',
-            chatId: ctx.chatId
-        };
-    }
-    
-    // Get current buffer state
-    getState() {
-        return {
-            messageCount: this.messages.length,
-            currentSize: this.currentSize,
-            hasTimeout: this.timeoutHandle !== null
-        };
+        return dateObj.toISOString().split('T')[0]; // YYYY-MM-DD format
+    } catch (e) {
+        console.warn(`[${MODULE_NAME_FANCY}] Error formatting date:`, e);
+        return new Date().toISOString().split('T')[0];
     }
 }
 
-// Global memory buffer instance
-const memoryBuffer = new MemoryBuffer();
+function createChunkFromBuffer() {
+    if (messageBuffer.length === 0) return null;
 
-// Process and store a chunk to Qdrant
-async function process_and_store_chunk(chunk) {
+    const ctx = getContext();
+    let chunkText = '';
+    const speakers = new Set();
+    const messageIds = [];
+    let oldestTimestamp = Infinity;
+
+    // Build chunk text with speaker labels
+    messageBuffer.forEach((msg) => {
+        const speaker = msg.isUser ? getUserDisplayName() : (ctx.name2 || 'Character');
+        speakers.add(speaker);
+        messageIds.push(msg.messageId);
+
+        // Track oldest message timestamp for proper temporal filtering
+        if (msg.timestamp && msg.timestamp < oldestTimestamp) {
+            oldestTimestamp = msg.timestamp;
+        }
+
+        const line = `${speaker}: ${msg.text}\n`;
+        chunkText += line;
+    });
+
+    // Format date prefix
+    let finalText = chunkText.trim();
+    const dateStr = formatDateForChunk(oldestTimestamp);
+    finalText = `[${dateStr}]\n${finalText}`;
+
+    return {
+        text: finalText,
+        speakers: Array.from(speakers),
+        messageIds: messageIds,
+        messageCount: messageBuffer.length,
+        timestamp: oldestTimestamp,  // Use oldest message time, not indexing time
+        chatId: ctx.chatId,
+        characterName: ctx.name2 || 'Unknown'
+    };
+}
+
+async function processMessageBuffer() {
+    if (!get_settings('qdrant_enabled')) return;
+    if (messageBuffer.length === 0) return;
+    
+    const chunk = createChunkFromBuffer();
+    if (!chunk) return;
+    
+    try {
+        await saveChunkToQdrant(chunk);
+        debug_qdrant(`Saved chunk with ${chunk.messageCount} messages`);
+    } catch (e) {
+        error('Failed to save chunk:', e);
+    }
+    
+    // Clear buffer after saving
+    messageBuffer = [];
+}
+
+function buffer_message(index, text, isUser) {
+    if (!get_settings('qdrant_enabled')) return;
+    if (!get_settings('auto_save_memories')) return;
+    if (!text || text.length < 5) return;
+    
+    // Check if we should save this type of message
+    if (isUser && !get_settings('save_user_messages')) return;
+    if (!isUser && !get_settings('save_char_messages')) return;
+    
+    const ctx = getContext();
+    const messageId = `${ctx.name2}_${Date.now()}_${index}`;
+
+    // Get message timestamp from chat
+    const message = ctx.chat[index];
+    const msgTimestamp = message?.send_date ? normalizeTimestamp(message.send_date) : Date.now();
+
+    // Check if message already in buffer
+    const existingIndex = messageBuffer.findIndex((msg) => msg.messageId === messageId);
+    if (existingIndex !== -1) {
+        // Update if longer text
+        if (text.length > messageBuffer[existingIndex].text.length) {
+            messageBuffer[existingIndex].text = text;
+        }
+        return;
+    }
+
+    messageBuffer.push({
+        text: text,
+        characterName: ctx.name2 || 'Character',
+        isUser: isUser,
+        messageId: messageId,
+        index: index,
+        timestamp: msgTimestamp
+    });
+    
+    lastMessageTime = Date.now();
+    
+    // Calculate current buffer size
+    let bufferSize = 0;
+    messageBuffer.forEach((msg) => {
+        bufferSize += msg.text.length + (msg.characterName?.length || 0) + 4;
+    });
+    
+    debug_qdrant(`Buffer: ${messageBuffer.length} messages, ${bufferSize} chars`);
+    
+    // Clear existing timer
+    if (chunkTimer) {
+        clearTimeout(chunkTimer);
+    }
+    
+    const minSize = get_settings('chunk_min_size') || 1200;
+    const maxSize = get_settings('chunk_max_size') || 1500;
+    const timeout = get_settings('chunk_timeout') || 30000;
+    
+    // If buffer exceeds max size, process it now
+    if (bufferSize >= maxSize) {
+        debug_qdrant(`Buffer reached max size (${bufferSize}), processing chunk`);
+        processMessageBuffer();
+    }
+    // If buffer is at least min size, set a short timer
+    else if (bufferSize >= minSize) {
+        chunkTimer = setTimeout(() => {
+            debug_qdrant(`Buffer reached min size and timeout, processing chunk`);
+            processMessageBuffer();
+        }, 5000);
+    }
+    // Otherwise, set a longer timer
+    else {
+        chunkTimer = setTimeout(() => {
+            debug_qdrant(`Buffer timeout reached, processing chunk`);
+            processMessageBuffer();
+        }, timeout);
+    }
+}
+
+// Save chunk to Qdrant (simplified - matches st-qdrant-memory)
+async function saveChunkToQdrant(chunk) {
     if (!get_settings('qdrant_enabled')) {
         debug_qdrant('Qdrant disabled, skipping chunk storage');
         return;
     }
     
-    debug_qdrant(`Processing chunk: ${chunk.messageIndexes.length} messages, ${chunk.text.length} chars`);
+    debug_qdrant(`Saving chunk: ${chunk.messageCount} messages, ${chunk.text.length} chars`);
     
     try {
         // Generate embedding for the chunk
@@ -3541,28 +5070,29 @@ async function process_and_store_chunk(chunk) {
         // Ensure collection exists
         await ensure_collection_exists();
         
-        // Create point for Qdrant
+        // Create point for Qdrant with simplified payload
         const point = {
             id: generate_point_id(),
             vector: embedding,
             payload: {
                 text: chunk.text,
-                message_indexes: chunk.messageIndexes,
-                first_index: chunk.firstIndex,
-                last_index: chunk.lastIndex,
+                speakers: chunk.speakers.join(', '),
+                messageCount: chunk.messageCount,
                 timestamp: chunk.timestamp,
-                character_name: chunk.characterName,
-                chat_id: chunk.chatId
+                messageIds: chunk.messageIds.join(','),
+                isChunk: true,
+                chatId: chunk.chatId,
+                characterName: chunk.characterName
             }
         };
         
         // Upsert to Qdrant
         await upsert_points([point]);
         
-        debug_qdrant(`Stored chunk with ${chunk.messageIndexes.length} messages to Qdrant`);
+        debug_qdrant(`Stored chunk with ${chunk.messageCount} messages to Qdrant`);
         
     } catch (e) {
-        error('Failed to process and store chunk:', e);
+        error('Failed to save chunk:', e);
         throw e;
     }
 }
@@ -3579,7 +5109,7 @@ function generate_point_id() {
 
 // ==================== QDRANT STORAGE FUNCTIONS ====================
 
-// Ensure collection exists with correct configuration
+// Ensure collection exists with correct configuration and payload indexes
 async function ensure_collection_exists() {
     const url = get_settings('qdrant_url');
     const collection = get_current_collection_name();
@@ -3601,6 +5131,8 @@ async function ensure_collection_exists() {
         
         if (checkResponse.ok) {
             debug_qdrant(`Collection ${collection} already exists`);
+            // Ensure payload indexes exist (idempotent operation)
+            await ensure_payload_indexes(collection);
             return;
         }
         
@@ -3625,9 +5157,49 @@ async function ensure_collection_exists() {
         
         debug_qdrant(`Created collection ${collection}`);
         
+        // Create payload indexes for efficient filtering
+        await ensure_payload_indexes(collection);
+        
     } catch (e) {
         error('Failed to ensure collection exists:', e);
         throw e;
+    }
+}
+
+// Create payload indexes for efficient filtering (V10 enhancement)
+async function ensure_payload_indexes(collection) {
+    const url = get_settings('qdrant_url');
+    
+    const indexes = [
+        { field: 'chat_id', schema: { type: 'keyword', is_tenant: true } },  // Primary filter, tenant-optimized
+        { field: 'timestamp', schema: { type: 'integer' } },  // For temporal sorting/filtering
+        { field: 'message_hash', schema: { type: 'keyword' } },  // For deduplication
+        { field: 'is_user', schema: { type: 'bool' } },  // For filtering by message type
+        { field: 'chunk_id', schema: { type: 'keyword' } },  // For chunk-based operations
+    ];
+    
+    for (const index of indexes) {
+        try {
+            const response = await fetch(`${url}/collections/${collection}/index`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    field_name: index.field,
+                    field_schema: index.schema
+                })
+            });
+            
+            if (response.ok) {
+                debug_qdrant(`Created/verified index for ${index.field}`);
+            } else {
+                // Index may already exist with different schema - that's okay
+                const errorText = await response.text();
+                debug_qdrant(`Index ${index.field}: ${errorText}`);
+            }
+        } catch (e) {
+            debug_qdrant(`Failed to create index for ${index.field}:`, e);
+            // Non-fatal - continue with other indexes
+        }
     }
 }
 
@@ -3640,129 +5212,270 @@ async function upsert_points(points) {
         throw new Error('Qdrant not configured');
     }
     
-    const response = await fetch(`${url}/collections/${collection}/points`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            points: points
-        })
-    });
+    const MAX_RETRIES = 3;
+    const BASE_DELAY = 1000; // 1 second
     
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to upsert points: ${errorText}`);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetch(`${url}/collections/${collection}/points`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    points: points
+                })
+            });
+            
+            if (!response.ok) {
+                // Check if it's a retryable error (503 Service Unavailable)
+                if (response.status === 503 && attempt < MAX_RETRIES) {
+                    const delay = BASE_DELAY * Math.pow(2, attempt);
+                    debug_qdrant(`Qdrant 503 error on upsert, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+                
+                const errorText = await response.text();
+                throw new Error(`Failed to upsert points: ${errorText}`);
+            }
+            
+            debug_qdrant(`Upserted ${points.length} points to ${collection}`);
+            return; // Success
+        } catch (err) {
+            // Network errors or other exceptions
+            if (attempt < MAX_RETRIES) {
+                const delay = BASE_DELAY * Math.pow(2, attempt);
+                debug_qdrant(`Qdrant upsert error: ${err.message}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            throw err; // Final attempt failed
+        }
     }
-    
-    debug_qdrant(`Upserted ${points.length} points to ${collection}`);
 }
 
-// Search for similar memories
+// Simple temporal filtering (like st-qdrant-memory)
+// Excludes recent messages based on retain_recent_messages setting
+async function search_with_simple_temporal(collection, queryEmbedding, limit, scoreThreshold) {
+    // Calculate timestamp threshold to exclude recent messages
+    const ctx = getContext();
+    const chat = ctx.chat || [];
+    const retainRecent = get_settings('retain_recent_messages');
+    let timestampThreshold = 0;
+
+    if (retainRecent > 0 && chat.length > retainRecent) {
+        const retainIndex = chat.length - retainRecent;
+        const retainMessage = chat[retainIndex];
+        if (retainMessage && retainMessage.send_date) {
+            timestampThreshold = normalizeTimestamp(retainMessage.send_date);
+            debug_qdrant(`Simple temporal filter: excluding messages newer than ${timestampThreshold}`);
+        }
+    }
+
+    // Use standard search with timestamp filtering
+    return await search_standard_with_filter(
+        collection, queryEmbedding, limit, scoreThreshold, timestampThreshold
+    );
+}
+
+// Simple, reliable search limit calculation (V13 - simplified like st-qdrant-memory)
+function calculateSearchLimit(limit) {
+    // Fixed 1.5x overfetch for temporal re-ranking - much more reasonable than 3x
+    // This gives us enough results for deduplication without excessive data
+    return Math.ceil(limit * 1.5);
+}
+
+// Simplified memory search with reliable temporal filtering (V13 - like st-qdrant-memory)
 async function search_memories(queryText, limit = null, scoreThreshold = null) {
     const url = get_settings('qdrant_url');
     const collection = get_current_collection_name();
-    
+
     if (!url || !collection) {
         throw new Error('Qdrant not configured');
     }
-    
+
     limit = limit ?? get_settings('memory_limit');
     scoreThreshold = scoreThreshold ?? get_settings('score_threshold');
-    
-    // Request extra results if deduplication is enabled (to have enough after removing duplicates)
-    const autoDedupe = get_settings('auto_dedupe');
-    const requestLimit = autoDedupe ? limit * 2 : limit;
-    
+
+    // Calculate timestamp threshold to exclude recent messages
+    const ctx = getContext();
+    const chat = ctx.chat || [];
+    const retainRecent = get_settings('retain_recent_messages');
+    let timestampThreshold = 0;
+
+    if (retainRecent > 0 && chat.length > retainRecent) {
+        const retainIndex = chat.length - retainRecent;
+        const retainMessage = chat[retainIndex];
+        if (retainMessage && retainMessage.send_date) {
+            timestampThreshold = normalizeTimestamp(retainMessage.send_date);
+            debug_qdrant(`Excluding messages newer than timestamp: ${timestampThreshold}`);
+        }
+    }
+
+    debug_qdrant(`Search - limit:${limit}, retainRecent:${retainRecent}`);
+
     try {
         // Generate embedding for query
         const queryEmbedding = await generate_embedding(queryText);
-        
+
         if (!queryEmbedding || queryEmbedding.length === 0) {
             throw new Error('Failed to generate query embedding');
         }
-        
-        // Build search request
-        const searchBody = {
-            vector: queryEmbedding,
-            limit: requestLimit,
-            score_threshold: scoreThreshold,
-            with_payload: true
-        };
-        
-        const response = await fetch(`${url}/collections/${collection}/points/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(searchBody)
-        });
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Search failed: ${errorText}`);
-        }
-        
-        const data = await response.json();
-        let results = data.result || [];
-        
+
+        // Simple standard search with timestamp filtering
+        let results = await search_standard_with_filter(
+            collection, queryEmbedding, limit, scoreThreshold, timestampThreshold
+        );
+
         debug_qdrant(`Search returned ${results.length} results`);
-        
-        // Detect and remove duplicates if enabled
-        if (autoDedupe && results.length > 0) {
-            const { uniqueResults, duplicateIds } = detect_duplicates(results);
-            
-            // Async delete duplicates (fire-and-forget)
-            if (duplicateIds.length > 0) {
-                delete_points_by_ids(duplicateIds).catch(e => {
-                    error('Failed to delete duplicate points:', e);
-                });
-                debug_qdrant(`Removing ${duplicateIds.length} duplicates, keeping ${uniqueResults.length} unique`);
-            }
-            
-            results = uniqueResults;
+
+        // Remove duplicates if enabled
+        if (get_settings('auto_dedupe') && results.length > 0) {
+            results = deduplicate_results_simple(results);
         }
-        
-        // Limit to requested count after deduplication
+
+        // Limit to requested count
         results = results.slice(0, limit);
-        
-        // Map results to common format (handle both old chunked format and new per-message format)
-        return results.map(r => {
-            const payload = r.payload;
-            
-            // Check for new per-message format (message_index) vs old chunked format (message_indexes)
-            if (payload.message_index !== undefined) {
-                // New per-message format
-                return {
-                    id: r.id,
-                    score: r.score,
-                    text: payload.text,
-                    messageIndex: payload.message_index,
-                    messageHash: payload.message_hash,
-                    isUser: payload.is_user,
-                    // For backwards compatibility, also provide first/last index
-                    firstIndex: payload.message_index,
-                    lastIndex: payload.message_index,
-                    timestamp: payload.timestamp,
-                    characterName: payload.character_name,
-                    chatId: payload.chat_id
-                };
-            } else {
-                // Old chunked format
-                return {
-                    id: r.id,
-                    score: r.score,
-                    text: payload.text,
-                    messageIndexes: payload.message_indexes,
-                    firstIndex: payload.first_index,
-                    lastIndex: payload.last_index,
-                    timestamp: payload.timestamp,
-                    characterName: payload.character_name,
-                    chatId: payload.chat_id
-                };
-            }
-        });
-        
+
+        // Map results to memory format
+        const memories = results.map(r => map_search_result_to_memory(r));
+
+        // Track retrieval statistics
+        track_retrieval_stats(memories, 0);
+
+        return memories;
+
     } catch (e) {
         error('Failed to search memories:', e);
         throw e;
     }
+}
+
+// Standard search without temporal scoring
+async function search_standard(collection, queryEmbedding, limit, scoreThreshold) {
+    const url = get_settings('qdrant_url');
+
+    const searchBody = {
+        vector: queryEmbedding,
+        limit: limit,
+        score_threshold: scoreThreshold,
+        with_payload: true
+    };
+
+    const response = await fetch(`${url}/collections/${collection}/points/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchBody)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Search failed: ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.result || [];
+}
+
+// Standard search with timestamp filtering (excludes recent messages)
+async function search_standard_with_filter(collection, queryEmbedding, limit, scoreThreshold, timestampThreshold) {
+    const url = get_settings('qdrant_url');
+
+    const searchBody = {
+        vector: queryEmbedding,
+        limit: limit,
+        score_threshold: scoreThreshold,
+        with_payload: true
+    };
+
+    // Only apply timestamp filter if threshold is meaningful
+    // This allows retrieval even with legacy data that has wrong timestamps
+    if (timestampThreshold > 0) {
+        searchBody.filter = {
+            must: [
+                {
+                    key: 'timestamp',
+                    range: {
+                        lt: timestampThreshold
+                    }
+                }
+            ]
+        };
+    }
+
+    const response = await fetch(`${url}/collections/${collection}/points/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(searchBody)
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Search failed: ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.result || [];
+}
+
+// Map a raw search result to a standardized memory object
+function map_search_result_to_memory(r) {
+    const payload = r.payload;
+    
+    // V10 chunk format (new)
+    if (payload.chunk_id !== undefined) {
+        return {
+            id: r.id,
+            score: r.score,
+            originalScore: r.originalScore,  // May be present from client-side temporal scoring
+            temporalMultiplier: r.temporalMultiplier,
+            text: payload.text,
+            chunkId: payload.chunk_id,
+            messageIndexes: payload.message_indexes || [],
+            firstIndex: payload.first_index,
+            lastIndex: payload.last_index,
+            timestamp: payload.timestamp,
+            characterName: payload.character_name,
+            chatId: payload.chat_id,
+            datePrefix: payload.date_prefix,
+            isChunk: true
+        };
+    }
+    
+    // Per-message format (message_index singular)
+    if (payload.message_index !== undefined) {
+        return {
+            id: r.id,
+            score: r.score,
+            originalScore: r.originalScore,
+            temporalMultiplier: r.temporalMultiplier,
+            text: payload.text,
+            messageIndex: payload.message_index,
+            messageHash: payload.message_hash,
+            isUser: payload.is_user,
+            firstIndex: payload.message_index,
+            lastIndex: payload.message_index,
+            timestamp: payload.timestamp,
+            characterName: payload.character_name,
+            chatId: payload.chat_id,
+            isChunk: false
+        };
+    }
+    
+    // Old chunked format (message_indexes plural, no chunk_id)
+    return {
+        id: r.id,
+        score: r.score,
+        originalScore: r.originalScore,
+        temporalMultiplier: r.temporalMultiplier,
+        text: payload.text,
+        messageIndexes: payload.message_indexes,
+        firstIndex: payload.first_index,
+        lastIndex: payload.last_index,
+        timestamp: payload.timestamp,
+        characterName: payload.character_name,
+        chatId: payload.chat_id,
+        isChunk: true
+    };
 }
 
 // Get collection info
@@ -3792,15 +5505,43 @@ async function get_collection_info() {
     }
 }
 
-// Add a message to the memory buffer (DEPRECATED - kept for backwards compatibility)
-function buffer_message(index, text, isUser) {
-    // Redirect to new per-message vectorization
-    vectorize_message(index, text, isUser);
+// Buffer a message for chunked vectorization
+function buffer_message_for_chunking(index, text, isUser, message) {
+    // REQ-005 FIX: Ensure message hash is computed for deduplication
+    if (message && message.mes && !get_data(message, 'hash')) {
+        set_data(message, 'hash', getStringHash(message.mes));
+    }
+    
+    // Check vectorization delay
+    const ctx = getContext();
+    const delay = get_settings('vectorization_delay');
+    if (index >= ctx.chat.length - delay) {
+        debug_qdrant(`Message ${index} within delay window (${delay}), skipping buffer`);
+        return;
+    }
+    
+    // Check if already chunked
+    if (get_data(message, 'chunked')) {
+        debug_qdrant(`Message ${index} already chunked, skipping`);
+        return;
+    }
+    
+    // Create message hash for deduplication
+    const messageHash = getStringHash(text);
+    
+    // Add to chunk buffer
+    chunkBuffer.add({
+        index: index,
+        text: text,
+        isUser: isUser,
+        timestamp: Date.now(),
+        hash: messageHash
+    });
+    
+    debug_qdrant(`Buffered message ${index} for chunking (buffer: ${chunkBuffer.getState().messageCount} messages)`);
 }
 
-// ==================== PER-MESSAGE VECTORIZATION (NEW) ====================
-
-// Vectorize a single message and store it in Qdrant
+// Vectorize a single message directly (legacy/fallback mode)
 async function vectorize_message(index, text, isUser) {
     if (!get_settings('qdrant_enabled')) return;
     if (!get_settings('auto_save_memories')) return;
@@ -3815,9 +5556,9 @@ async function vectorize_message(index, text, isUser) {
         return;
     }
     
-    // Check if already vectorized
-    if (get_data(message, 'vectorized')) {
-        debug_qdrant(`Message ${index} already vectorized, skipping`);
+    // Check if already vectorized or chunked
+    if (get_data(message, 'vectorized') || get_data(message, 'chunked')) {
+        debug_qdrant(`Message ${index} already vectorized/chunked, skipping`);
         return;
     }
     
@@ -3834,7 +5575,6 @@ async function vectorize_message(index, text, isUser) {
         const summary = get_memory(message);
         if (summary) {
             textToVectorize = summary;
-            debug_synergy(`Using summary for message ${index}`);
         }
     }
     
@@ -3852,7 +5592,7 @@ async function vectorize_message(index, text, isUser) {
         // Create message hash for deduplication and deletion
         const messageHash = getStringHash(text);
         
-        // Create point
+        // Create point with V10 payload structure
         const point = {
             id: generate_point_id(),
             vector: embedding,
@@ -3863,7 +5603,8 @@ async function vectorize_message(index, text, isUser) {
                 is_user: isUser,
                 timestamp: Date.now(),
                 chat_id: ctx.chatId,
-                character_name: ctx.name2 || 'Unknown'
+                character_name: ctx.name2 || 'Unknown',
+                is_chunk: false  // V10: Mark as per-message, not chunked
             }
         };
         
@@ -3881,7 +5622,7 @@ async function vectorize_message(index, text, isUser) {
     }
 }
 
-// Vectorize messages that were previously skipped due to delay
+// Vectorize/chunk messages that were previously skipped due to delay
 async function vectorize_delayed_messages() {
     if (!get_settings('qdrant_enabled')) return;
     if (!get_settings('auto_save_memories')) return;
@@ -3893,10 +5634,11 @@ async function vectorize_delayed_messages() {
     
     const delay = get_settings('vectorization_delay');
     const threshold = chat.length - delay;
+    const useChunking = get_settings('enable_chunked_vectorization');
     
-    debug_qdrant(`Checking for delayed messages to vectorize (threshold: ${threshold})`);
+    debug_qdrant(`Checking for delayed messages (threshold: ${threshold}, chunking: ${useChunking})`);
     
-    let vectorized = 0;
+    let processed = 0;
     
     for (let i = 0; i < threshold; i++) {
         const message = chat[i];
@@ -3904,20 +5646,222 @@ async function vectorize_delayed_messages() {
         // Skip system messages
         if (message.is_system) continue;
         
-        // Skip already vectorized
-        if (get_data(message, 'vectorized')) continue;
+        // Skip already processed
+        if (get_data(message, 'vectorized') || get_data(message, 'chunked')) continue;
         
         // Check message type settings
         if (message.is_user && !get_settings('save_user_messages')) continue;
         if (!message.is_user && !get_settings('save_char_messages')) continue;
         
-        // Vectorize this message
-        await vectorize_message(i, message.mes, message.is_user);
-        vectorized++;
+        if (useChunking) {
+            // Buffer for chunking
+            buffer_message_for_chunking(i, message.mes, message.is_user, message);
+        } else {
+            // Direct vectorization
+            await vectorize_message(i, message.mes, message.is_user);
+        }
+        processed++;
     }
     
-    if (vectorized > 0) {
-        debug_qdrant(`Vectorized ${vectorized} delayed messages`);
+    // If using chunking, force flush any remaining buffer after processing delayed messages
+    if (useChunking && processed > 0) {
+        const chunk = chunkBuffer.forceFlush();
+        if (chunk) {
+            try {
+                await process_and_store_chunk(chunk);
+            } catch (e) {
+                error('Failed to process final chunk:', e);
+            }
+        }
+    }
+    
+    if (processed > 0) {
+        debug_qdrant(`Processed ${processed} delayed messages (chunking: ${useChunking})`);
+    }
+}
+
+// ==================== VECTOR STATISTICS FUNCTIONS (V11) ====================
+
+// Create a simple text-based score distribution chart
+function create_score_distribution_chart(scores) {
+    if (!scores || scores.length === 0) return '--';
+
+    // Categorize scores: high (>=0.8), medium (0.5-0.8), low (<0.5)
+    const categories = { high: 0, medium: 0, low: 0 };
+    for (const score of scores) {
+        if (score >= 0.8) categories.high++;
+        else if (score >= 0.5) categories.medium++;
+        else categories.low++;
+    }
+
+    // Create a simple bar chart (max 10 characters)
+    const total = scores.length;
+    const highBars = Math.round((categories.high / total) * 10);
+    const mediumBars = Math.round((categories.medium / total) * 10);
+    const lowBars = Math.round((categories.low / total) * 10);
+
+    const chart = '█'.repeat(highBars) + '░'.repeat(mediumBars) + '▒'.repeat(lowBars);
+
+    return `${chart} (${categories.high}/${categories.medium}/${categories.low})`;
+}
+
+// Get detailed collection statistics
+async function get_vector_statistics() {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+
+    if (!url || !collection) {
+        return null;
+    }
+
+    try {
+        // Get collection info
+        const infoResponse = await fetch(`${url}/collections/${collection}`, {
+            method: 'GET'
+        });
+
+        if (!infoResponse.ok) {
+            return null;
+        }
+
+        const info = await infoResponse.json();
+        const totalPoints = info.result?.points_count || 0;
+
+        // Count chunks vs single messages (optional, may be slow for large collections)
+        let chunkCount = 0;
+        let singleCount = 0;
+
+        // Use scroll API to count by type (paginated)
+        // This is optional - can skip if collection is large
+        if (totalPoints < 10000) {
+            const scrollResponse = await fetch(`${url}/collections/${collection}/points/scroll`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    limit: totalPoints,
+                    with_payload: ['is_chunk']
+                })
+            });
+
+            if (scrollResponse.ok) {
+                const scrollData = await scrollResponse.json();
+                for (const point of scrollData.result?.points || []) {
+                    if (point.payload?.is_chunk) {
+                        chunkCount++;
+                    } else {
+                        singleCount++;
+                    }
+                }
+            }
+        }
+
+        return {
+            collectionName: collection,
+            totalPoints: totalPoints,
+            chunkPoints: chunkCount,
+            singlePoints: singleCount
+        };
+
+    } catch (e) {
+        error('Failed to get vector statistics:', e);
+        return null;
+    }
+}
+
+// Track retrieval statistics after memory search
+function track_retrieval_stats(memories, duplicateCount) {
+    VECTOR_STATS.retrievedCount = memories.length;
+    VECTOR_STATS.duplicatesRemoved = duplicateCount;
+    VECTOR_STATS.lastRetrieval = Date.now();
+
+    if (memories.length > 0) {
+        const scores = memories.map(m => m.score);
+        VECTOR_STATS.scores = scores; // Store for distribution chart
+        VECTOR_STATS.avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+        VECTOR_STATS.minScore = Math.min(...scores);
+        VECTOR_STATS.maxScore = Math.max(...scores);
+    } else {
+        VECTOR_STATS.scores = [];
+        VECTOR_STATS.avgScore = 0;
+        VECTOR_STATS.minScore = 0;
+        VECTOR_STATS.maxScore = 0;
+    }
+}
+
+// Update vector statistics display
+async function update_vector_stats_display() {
+    // Show/hide card based on Qdrant enabled setting
+    const isQdrantEnabled = get_settings('qdrant_enabled');
+    $('#ct_vector_memory_card').toggle(isQdrantEnabled);
+
+    if (!isQdrantEnabled) {
+        return; // Don't update stats if disabled
+    }
+
+    // Update health indicator
+    const $health = $('#ct_ov_vector_health');
+    if (VECTOR_STATS.connected) {
+        $health.text('✓ Connected').removeClass('ct_health_unknown ct_health_error').addClass('ct_health_good');
+    } else {
+        $health.text('✗ Error').removeClass('ct_health_unknown ct_health_good').addClass('ct_health_error');
+    }
+
+    // Update stored count
+    if (VECTOR_STATS.totalPoints > 0) {
+        const label = VECTOR_STATS.chunkPoints > 0 ? 'chunks' : 'points';
+        $('#ct_ov_vector_stored').text(`${VECTOR_STATS.totalPoints} ${label}`);
+    } else {
+        $('#ct_ov_vector_stored').text('-- chunks');
+    }
+
+    // Update retrieved stats (display elements removed per REQ-007/REQ-008)
+    // Statistics are still tracked in VECTOR_STATS for internal use
+
+    // Update buffer state
+    const bufferCount = messageBuffer.length;
+    $('#ct_ov_vector_buffer').text(`${bufferCount} msgs`);
+
+    // Update advanced stats
+    $('#ct_ov_collection_name').text(VECTOR_STATS.collectionName || '--');
+    $('#ct_ov_total_points').text(VECTOR_STATS.totalPoints || '--');
+    $('#ct_ov_chunk_points').text(VECTOR_STATS.chunkPoints || '--');
+    $('#ct_ov_single_points').text(VECTOR_STATS.singlePoints || '--');
+    $('#ct_ov_temporal_mode').text(VECTOR_STATS.temporalMode === 'server' ? 'Server-side' :
+                                   VECTOR_STATS.temporalMode === 'client' ? 'Client-side' : '--');
+    $('#ct_ov_avg_score').text(VECTOR_STATS.avgScore > 0 ? VECTOR_STATS.avgScore.toFixed(3) : '--');
+    $('#ct_ov_score_range').text(VECTOR_STATS.minScore > 0 ?
+                                  `${VECTOR_STATS.minScore.toFixed(2)} - ${VECTOR_STATS.maxScore.toFixed(2)}` : '--');
+    $('#ct_ov_deduped').text(VECTOR_STATS.duplicatesRemoved > 0 ? VECTOR_STATS.duplicatesRemoved : '0');
+}
+
+// Refresh vector statistics (called manually via button)
+async function refresh_vector_statistics() {
+    try {
+        // Test connection
+        const url = get_settings('qdrant_url');
+        if (url) {
+            const response = await fetch(`${url}/collections`, { method: 'GET' });
+            VECTOR_STATS.connected = response.ok;
+        } else {
+            VECTOR_STATS.connected = false;
+        }
+
+        // Get collection stats
+        if (VECTOR_STATS.connected) {
+            const stats = await get_vector_statistics();
+            if (stats) {
+                VECTOR_STATS.collectionName = stats.collectionName;
+                VECTOR_STATS.totalPoints = stats.totalPoints;
+                VECTOR_STATS.chunkPoints = stats.chunkPoints;
+                VECTOR_STATS.singlePoints = stats.singlePoints;
+                VECTOR_STATS.lastCollectionCheck = Date.now();
+            }
+        }
+
+    } catch (e) {
+        VECTOR_STATS.connected = false;
+        VECTOR_STATS.lastConnectionError = String(e);
+        debug_qdrant('Vector statistics refresh failed:', e);
     }
 }
 
@@ -3928,20 +5872,20 @@ function detect_duplicates(results) {
     const seenHashes = new Map();  // hash -> { result, timestamp }
     const uniqueResults = [];
     const duplicateIds = [];
-    
+
     for (const result of results) {
         const hash = result.payload.message_hash;
         const timestamp = result.payload.timestamp;
-        
+
         // Skip results without hash (old format)
         if (!hash) {
             uniqueResults.push(result);
             continue;
         }
-        
+
         if (seenHashes.has(hash)) {
             const existing = seenHashes.get(hash);
-            
+
             if (timestamp > existing.timestamp) {
                 // Current is newer = duplicate, delete it
                 duplicateIds.push(result.id);
@@ -3961,8 +5905,26 @@ function detect_duplicates(results) {
             uniqueResults.push(result);
         }
     }
-    
+
     return { uniqueResults, duplicateIds };
+}
+
+// Simple deduplication function that removes duplicates and returns unique results
+function deduplicate_results_simple(results) {
+    if (!results || results.length === 0) {
+        return results;
+    }
+
+    const { uniqueResults, duplicateIds } = detect_duplicates(results);
+
+    // Async cleanup of duplicates (fire-and-forget)
+    if (duplicateIds.length > 0) {
+        delete_points_by_ids(duplicateIds).catch(e => {
+            debug_qdrant('Failed to delete duplicate points:', e);
+        });
+    }
+
+    return uniqueResults;
 }
 
 // Delete points by their IDs
@@ -4030,110 +5992,370 @@ async function handle_qdrant_message_deleted() {
     if (!get_settings('qdrant_enabled')) return;
     if (!get_settings('delete_on_message_delete')) return;
     
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    
+    if (!url || !collection) return;
+    
     const ctx = getContext();
     const chat = ctx.chat;
     const currentLength = chat ? chat.length : 0;
-    const previousLength = LAST_CHAT_LENGTH;
     
-    if (currentLength >= previousLength) return;  // No deletion
+    // Use PRE_SNAPSHOT to determine which messages were deleted
+    const deletedCount = PRE_SNAPSHOT_CHAT_LENGTH - currentLength;
+    if (deletedCount <= 0) return;
     
-    debug_qdrant(`Message deletion detected: ${previousLength} -> ${currentLength}`);
+    debug_qdrant(`Handling Qdrant deletion for ${deletedCount} message(s)`);
     
-    // Find deleted message hashes by comparing snapshots
-    const deletedHashes = [];
-    
-    for (const [idx, oldHash] of LAST_CHAT_HASHES) {
-        const currentMessage = chat[idx];
-        const newHash = currentMessage ? compute_message_hash(currentMessage) : null;
+    try {
+        // Find deleted message hashes by comparing snapshots
+        const deletedHashes = [];
+        const deletedIndexes = [];
         
-        if (oldHash !== newHash) {
-            // This message was deleted or changed
-            // Look for vector_hash in our records
-            // Since message is deleted, we need to use the stored hash from LAST_CHAT_HASHES
-            deletedHashes.push(oldHash);
+        for (const [index, hash] of PRE_SNAPSHOT_CHAT_HASHES) {
+            // Check if this index/hash is still in current chat
+            const currentMessage = chat[index];
+            const currentHash = currentMessage ? compute_message_hash(currentMessage) : null;
+            
+            if (!currentHash || currentHash !== hash) {
+                deletedHashes.push(hash);
+                deletedIndexes.push(index);
+            }
         }
-    }
-    
-    if (deletedHashes.length === 0) {
-        debug_qdrant('No hashes found for deleted messages');
-        return;
-    }
-    
-    debug_qdrant(`Found ${deletedHashes.length} hashes to delete from Qdrant`);
-    
-    // Delete each hash from Qdrant
-    for (const hash of deletedHashes) {
-        try {
-            await delete_qdrant_point_by_hash(hash);
-        } catch (e) {
-            error(`Failed to delete Qdrant point for hash ${hash}:`, e);
+        
+        if (deletedHashes.length === 0) return;
+        
+        debug_qdrant(`Found ${deletedHashes.length} deleted message hashes:`, deletedHashes);
+        
+        // Delete per-message vectors by hash
+        for (const hash of deletedHashes) {
+            await delete_vectors_by_hash(url, collection, hash);
         }
+        
+        // Delete chunks containing any deleted message indexes
+        const reQueueIndexes = await delete_chunks_containing_indexes(url, collection, deletedIndexes);
+        
+        // Re-queue surviving messages from deleted chunks for re-vectorization
+        // REQ-004 FIX: Re-queue affected messages for vectorization
+        if (reQueueIndexes.length > 0) {
+            debug_qdrant(`Re-queuing ${reQueueIndexes.length} messages for vectorization`);
+            for (const idx of reQueueIndexes) {
+                if (chat[idx] && !chat[idx].is_system) {
+                    const msg = chat[idx];
+                    buffer_message_for_chunking(idx, msg.mes, msg.is_user, msg);
+                }
+            }
+        }
+        
+    } catch (e) {
+        error('Failed to delete Qdrant vectors:', e);
+        // Don't block message deletion on Qdrant errors
     }
 }
 
-// Index entire current chat
+// Delete vectors matching a message hash
+async function delete_vectors_by_hash(url, collection, hash) {
+    try {
+        const ctx = getContext();
+        const response = await fetch(`${url}/collections/${collection}/points/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filter: {
+                    must: [
+                        { key: 'message_hash', match: { value: hash } },
+                        { key: 'chat_id', match: { value: ctx.chatId } }
+                    ]
+                }
+            })
+        });
+        
+        if (response.ok) {
+            debug_qdrant(`Deleted vectors with hash: ${hash}`);
+        }
+    } catch (e) {
+        debug_qdrant(`Failed to delete vectors by hash: ${e.message}`);
+    }
+}
+
+// Delete chunks containing any of the given message indexes, return indexes to re-queue
+async function delete_chunks_containing_indexes(url, collection, deletedIndexes) {
+    const reQueueIndexes = [];
+    
+    try {
+        const ctx = getContext();
+        
+        // Search for chunks containing any deleted index
+        for (const deletedIndex of deletedIndexes) {
+            // Find chunks where message_indexes array contains deletedIndex
+            const searchResponse = await fetch(`${url}/collections/${collection}/points/scroll`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filter: {
+                        must: [
+                            { key: 'message_indexes', match: { any: [deletedIndex] } },
+                            { key: 'chat_id', match: { value: ctx.chatId } }
+                        ]
+                    },
+                    limit: 100,
+                    with_payload: true
+                })
+            });
+            
+            if (!searchResponse.ok) continue;
+            
+            const data = await searchResponse.json();
+            const points = data.result?.points || [];
+            
+            for (const point of points) {
+                const chunkIndexes = point.payload?.message_indexes || [];
+                
+                // Collect indexes that should be re-queued (not the deleted one)
+                for (const idx of chunkIndexes) {
+                    if (!deletedIndexes.includes(idx) && !reQueueIndexes.includes(idx)) {
+                        reQueueIndexes.push(idx);
+                    }
+                }
+                
+                // Delete the chunk
+                await fetch(`${url}/collections/${collection}/points/delete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        points: [point.id]
+                    })
+                });
+                
+                debug_qdrant(`Deleted chunk ${point.id} containing message ${deletedIndex}`);
+            }
+        }
+    } catch (e) {
+        debug_qdrant(`Failed to delete chunks: ${e.message}`);
+    }
+    
+    return reQueueIndexes;
+}
+
+// Check if a message hash already exists in Qdrant
+async function check_hash_exists_in_qdrant(messageHash) {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    const ctx = getContext();
+
+    if (!url || !collection) return false;
+
+    try {
+        const response = await fetch(`${url}/collections/${collection}/points/scroll`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filter: {
+                    must: [
+                        { key: 'message_hash', match: { value: messageHash } },
+                        { key: 'chat_id', match: { value: ctx.chatId } }
+                    ]
+                },
+                limit: 1,
+                with_payload: false
+            })
+        });
+
+        if (!response.ok) return false;
+
+        const data = await response.json();
+        return (data.result?.points?.length || 0) > 0;
+    } catch (e) {
+        debug_qdrant(`Hash check failed: ${e.message}`);
+        return false;
+    }
+}
+
+// Index entire current chat (matches Summarize All pattern exactly)
 async function index_current_chat() {
+    // If already active, stop (toggle behavior - matches Summarize All)
+    if (INDEXING_ACTIVE) {
+        stop_indexing();
+        return;
+    }
+
     const ctx = getContext();
     const chat = ctx.chat;
-    
+
     if (!get_settings('qdrant_enabled')) {
         toastr.error('Qdrant is not enabled', MODULE_NAME_FANCY);
         return;
     }
-    
-    toastr.info('Indexing current chat...', MODULE_NAME_FANCY);
-    
-    let indexed = 0;
-    let chunks = [];
-    
-    // Create temporary buffer for indexing
-    const indexBuffer = new MemoryBuffer();
-    
-    for (let i = 0; i < chat.length; i++) {
-        const message = chat[i];
-        
-        // Skip system messages
-        if (message.is_system) continue;
-        
-        const isUser = message.is_user;
-        
-        // Check if we should save this type
-        if (isUser && !get_settings('save_user_messages')) continue;
-        if (!isUser && !get_settings('save_char_messages')) continue;
-        
-        const chunk = indexBuffer.add({
-            index: i,
-            text: message.mes,
-            isUser: isUser,
-            timestamp: Date.now()
-        });
-        
-        if (chunk) {
-            chunks.push(chunk);
-        }
-        
-        indexed++;
+
+    if (!chat || chat.length === 0) {
+        toastr.info('No messages to index', MODULE_NAME_FANCY);
+        return;
     }
-    
-    // Flush any remaining messages
-    const finalChunk = indexBuffer.forceFlush();
-    if (finalChunk) {
-        chunks.push(finalChunk);
-    }
-    
-    // Process all chunks
-    let stored = 0;
-    for (const chunk of chunks) {
-        try {
-            await process_and_store_chunk(chunk);
-            stored++;
-        } catch (e) {
-            error(`Failed to store chunk:`, e);
+
+    // Set indexing state
+    INDEXING_ACTIVE = true;
+    INDEXING_STOPPED = false;
+    INDEXING_ABORT_CONTROLLER = new AbortController();
+
+    update_indexing_button_state('active');
+
+    // Helper for inline status updates
+    const $indexStatus = $('#ct_index_status');
+    const showIndexStatus = (message, isError = false) => {
+        $indexStatus
+            .removeClass('ct_status_success ct_status_error')
+            .addClass(isError ? 'ct_status_error' : 'ct_status_success')
+            .text(message)
+            .show();
+
+        // Auto-clear after 10 seconds
+        setTimeout(() => {
+            $indexStatus.fadeOut();
+        }, 10000);
+    };
+
+    debug_qdrant(`Starting chat indexing - ${chat.length} messages`);
+
+    // BUG-004 FIX: Check if collection exists and has data
+    // If collection is empty/missing, clear stale vectorized/chunked flags
+    const collectionInfo = await get_collection_info();
+    const collectionEmpty = !collectionInfo || (collectionInfo.points_count === 0);
+
+    if (collectionEmpty) {
+        debug_qdrant('Collection empty or missing - clearing stale vectorization flags');
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (get_data(msg, 'vectorized') || get_data(msg, 'chunked')) {
+                set_data(msg, 'vectorized', false);
+                set_data(msg, 'chunked', false);
+            }
         }
     }
-    
-    toastr.success(`Indexed ${indexed} messages into ${stored} chunks`, MODULE_NAME_FANCY);
-    debug_qdrant(`Indexed ${indexed} messages into ${stored} chunks`);
+
+    let processed = 0;
+    let skipped = 0;
+
+    try {
+        // Clear existing buffer to start fresh
+        messageBuffer = [];
+
+        // Iterate through ALL messages (like Summarize All)
+        for (let i = 0; i < chat.length; i++) {
+            // Check if stopped
+            if (INDEXING_STOPPED) {
+                debug_qdrant(`Indexing stopped at message ${i}`);
+                break;
+            }
+
+            const message = chat[i];
+
+            // Skip system messages
+            if (message.is_system) {
+                continue;
+            }
+
+            // Skip already vectorized/chunked messages
+            if (get_data(message, 'vectorized') || get_data(message, 'chunked')) {
+                skipped++;
+                continue;
+            }
+
+            // REQ-001: Check Qdrant for existing hash (authoritative deduplication)
+            const messageHash = getStringHash(message.mes);
+            try {
+                const existsInQdrant = await check_hash_exists_in_qdrant(messageHash);
+                if (existsInQdrant) {
+                    // Mark local flag to avoid re-checking next time
+                    set_data(message, 'chunked', true);
+                    skipped++;
+                    debug_qdrant(`Skipping message ${i} - already in Qdrant (hash: ${messageHash})`);
+                    continue;
+                }
+            } catch (e) {
+                debug_qdrant(`Hash check error for message ${i}: ${e.message}`);
+                // Continue with indexing on error (fail-open)
+            }
+
+            // Check message type settings
+            if (message.is_user && !get_settings('save_user_messages')) {
+                continue;
+            }
+            if (!message.is_user && !get_settings('save_char_messages')) {
+                continue;
+            }
+
+            // Add to buffer
+            const messageId = `${ctx.name2}_${Date.now()}_${i}`;
+            // Get message timestamp from chat
+            const msgTimestamp = message?.send_date ? normalizeTimestamp(message.send_date) : Date.now();
+
+            messageBuffer.push({
+                text: message.mes,
+                characterName: ctx.name2 || 'Character',
+                isUser: message.is_user,
+                messageId: messageId,
+                index: i,
+                timestamp: msgTimestamp
+            });
+
+            processed++;
+
+            // Check buffer size and process if needed
+            let bufferSize = 0;
+            messageBuffer.forEach((msg) => {
+                bufferSize += msg.text.length + (msg.characterName?.length || 0) + 4;
+            });
+
+            const maxSize = get_settings('chunk_max_size') || 1500;
+            if (bufferSize >= maxSize) {
+                try {
+                    await processMessageBuffer();
+                    // Mark processed messages as chunked
+                    for (const bufferedMsg of messageBuffer) {
+                        if (chat[bufferedMsg.index]) {
+                            set_data(chat[bufferedMsg.index], 'chunked', true);
+                        }
+                    }
+                } catch (e) {
+                    debug_qdrant(`Failed to process chunk: ${e.message}`);
+                }
+            }
+        }
+
+        // Process any remaining buffer
+        if (messageBuffer.length > 0 && !INDEXING_STOPPED) {
+            try {
+                await processMessageBuffer();
+            } catch (e) {
+                debug_qdrant(`Failed to process final chunk: ${e.message}`);
+            }
+        }
+
+        const wasStopped = INDEXING_STOPPED;
+        debug_qdrant(`Indexing ${wasStopped ? 'stopped' : 'completed'}: ${processed} processed, ${skipped} skipped`);
+
+        if (wasStopped) {
+            showIndexStatus('⚠ Indexing stopped', false);
+        } else if (processed === 0 && skipped > 0) {
+            showIndexStatus(`✓ All ${skipped} messages already indexed`, false);
+        } else if (processed > 0) {
+            showIndexStatus(`✓ Indexed ${processed} messages (${skipped} skipped)`, false);
+        } else {
+            showIndexStatus('ℹ No messages to index', false);
+        }
+
+    } catch (e) {
+        error('Failed to index chat:', e);
+        toastr.error(`Indexing failed: ${e.message}`, MODULE_NAME_FANCY);
+    } finally {
+        // Reset indexing state
+        INDEXING_ACTIVE = false;
+        INDEXING_STOPPED = false;
+        INDEXING_ABORT_CONTROLLER = null;
+        messageBuffer = [];  // Clear buffer
+
+        update_indexing_button_state('inactive');
+    }
 }
 
 // ==================== MEMORY RETRIEVAL AND INJECTION ====================
@@ -4226,9 +6448,10 @@ ${formattedMemories}
 // Global variable to store retrieved memories for current generation
 let CURRENT_QDRANT_MEMORIES = [];
 let CURRENT_QDRANT_INJECTION = '';
+let INJECTED_QDRANT_MEMORIES = [];  // Memories that were actually injected (for display)
 
 // Refresh Qdrant memories (called before generation)
-async function refresh_qdrant_memories() {
+async function refresh_qdrant_memories(updateDisplayMemories = true) {
     if (!get_settings('qdrant_enabled')) {
         CURRENT_QDRANT_MEMORIES = [];
         CURRENT_QDRANT_INJECTION = '';
@@ -4238,6 +6461,11 @@ async function refresh_qdrant_memories() {
     try {
         CURRENT_QDRANT_MEMORIES = await retrieve_relevant_memories();
         CURRENT_QDRANT_INJECTION = format_memories_for_injection(CURRENT_QDRANT_MEMORIES);
+
+        // Store a copy for display (so UI shows what was actually injected, not post-refresh results)
+        if (updateDisplayMemories) {
+            INJECTED_QDRANT_MEMORIES = [...CURRENT_QDRANT_MEMORIES];
+        }
         
         // Inject memories into context
         const ctx = getContext();
@@ -4297,6 +6525,32 @@ jQuery(async function () {
     // Setup UI and events
     initialize_ui_listeners();
     register_event_listeners();
+
+    // Ensure truncation index and calibration state are loaded on initial startup
+    // so the Overview and Calibration UIs reflect persisted chat metadata immediately
+    try {
+        load_truncation_index();
+        snapshot_chat_state();
+
+        // Refresh memory prompts and UI to reflect loaded state
+        refresh_memory();
+        update_calibration_ui();
+        update_summary_stats_display();
+        update_overview_tab();
+
+        // Refresh vector statistics asynchronously if Qdrant is enabled
+        if (get_settings('qdrant_enabled')) {
+            try {
+                await refresh_vector_statistics();
+            } catch (e) {
+                debug_qdrant('Initial refresh_vector_statistics failed:', e);
+                try { toastr.error(`Failed to refresh vector statistics: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) { }
+            }
+        }
+    } catch (e) {
+        console.error(`[${MODULE_NAME_FANCY}] Initialization post-load failed:`, e);
+        try { toastr.error(`Initialization failed: ${e.message || String(e)}`, MODULE_NAME_FANCY); } catch (t) {}
+    }
     
     log('Context Truncator loaded successfully');
 });

@@ -1,7 +1,7 @@
 <div id="context_truncator_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Enhanced Memory (Truncation + Qdrant)</b>
+            <b>CacheGuard</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -17,9 +17,6 @@
                 <button class="ct_tab" data-tab="qdrant">
                     <i class="fa-solid fa-brain"></i> Qdrant Memory
                 </button>
-                <button class="ct_tab" data-tab="synergy">
-                    <i class="fa-solid fa-link"></i> Synergy
-                </button>
             </div>
 
             <!-- ==================== OVERVIEW TAB ==================== -->
@@ -28,6 +25,7 @@
                 <!-- Context Utilization Gauge -->
                 <div class="ct_overview_section">
                     <h4><i class="fa-solid fa-gauge-high"></i> Context Utilization</h4>
+                    
                     <div class="ct_gauge_container">
                         <div class="ct_gauge_bar">
                             <div id="ct_gauge_fill" class="ct_gauge_fill ct_gauge_green" style="width: 0%"></div>
@@ -52,19 +50,23 @@
                     <h4><i class="fa-solid fa-chart-bar"></i> Context Breakdown</h4>
                     <div class="ct_breakdown_container">
                         <div class="ct_breakdown_bar">
-                            <div id="ct_breakdown_chat" class="ct_breakdown_segment ct_breakdown_chat" style="width: 0%"></div>
+                            <!-- VIS-010: Reordered to System → Summaries → World Rules → Chat → Qdrant → Free -->
                             <div id="ct_breakdown_system" class="ct_breakdown_segment ct_breakdown_system" style="width: 0%"></div>
-                            <div id="ct_breakdown_worldrules" class="ct_breakdown_segment ct_breakdown_worldrules" style="width: 0%"></div>
                             <div id="ct_breakdown_summaries" class="ct_breakdown_segment ct_breakdown_summaries" style="width: 0%"></div>
+                            <div id="ct_breakdown_worldrules" class="ct_breakdown_segment ct_breakdown_worldrules" style="width: 0%"></div>
+                            <div id="ct_breakdown_chat" class="ct_breakdown_segment ct_breakdown_chat" style="width: 0%"></div>
                             <div id="ct_breakdown_qdrant" class="ct_breakdown_segment ct_breakdown_qdrant" style="width: 0%"></div>
+                            <div id="ct_breakdown_lorevault" class="ct_breakdown_segment ct_breakdown_lorevault" style="width: 0%"></div>
                             <div id="ct_breakdown_free" class="ct_breakdown_segment ct_breakdown_free" style="width: 100%"></div>
                         </div>
                         <div class="ct_breakdown_legend">
-                            <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_chat"></span>Chat</span>
+                            <!-- VIS-010: Reordered to System → Summaries → World Rules → Chat → Qdrant → Free -->
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_system"></span>System</span>
-                            <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_worldrules"></span>World Rules</span>
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_summaries"></span>Summaries</span>
+                            <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_worldrules"></span>World Rules</span>
+                            <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_chat"></span>Chat</span>
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_qdrant"></span>Qdrant</span>
+                            <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_lorevault"></span>LoreVault</span>
                             <span class="ct_legend_item"><span class="ct_legend_color ct_breakdown_free"></span>Free</span>
                         </div>
                         <!-- Token Counts Foldable Section -->
@@ -73,25 +75,30 @@
                             <i class="fa-solid fa-chevron-down"></i>
                         </div>
                         <div class="ct_breakdown_details" id="ct_breakdown_details" style="display: none;">
-                            <div class="ct_breakdown_detail_row">
-                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_chat"></span>Chat</span>
-                                <span id="ct_breakdown_chat_tokens" class="ct_breakdown_value">-- tokens</span>
-                            </div>
+                            <!-- VIS-010: Reordered to System → Summaries → World Rules → Chat → Qdrant → Free -->
                             <div class="ct_breakdown_detail_row">
                                 <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_system"></span>System</span>
                                 <span id="ct_breakdown_system_tokens" class="ct_breakdown_value">-- tokens</span>
-                            </div>
-                            <div class="ct_breakdown_detail_row">
-                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_worldrules"></span>World Rules</span>
-                                <span id="ct_breakdown_worldrules_tokens" class="ct_breakdown_value">-- tokens</span>
                             </div>
                             <div class="ct_breakdown_detail_row">
                                 <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_summaries"></span>Summaries</span>
                                 <span id="ct_breakdown_summaries_tokens" class="ct_breakdown_value">-- tokens</span>
                             </div>
                             <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_worldrules"></span>World Rules</span>
+                                <span id="ct_breakdown_worldrules_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_chat"></span>Chat</span>
+                                <span id="ct_breakdown_chat_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
                                 <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_qdrant"></span>Qdrant</span>
                                 <span id="ct_breakdown_qdrant_tokens" class="ct_breakdown_value">-- tokens</span>
+                            </div>
+                            <div class="ct_breakdown_detail_row">
+                                <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_lorevault"></span>LoreVault</span>
+                                <span id="ct_breakdown_lorevault_tokens" class="ct_breakdown_value">-- tokens</span>
                             </div>
                             <div class="ct_breakdown_detail_row">
                                 <span class="ct_breakdown_label"><span class="ct_legend_color ct_breakdown_free"></span>Free</span>
@@ -107,8 +114,8 @@
 
                 <!-- Simplified Stats Cards Grid -->
                 <div class="ct_stats_grid ct_stats_grid_compact">
-                    
-                    <!-- Status Card (merged Truncation + Calibration essentials) -->
+
+                    <!-- Status Card (Phase + Next Trim only) -->
                     <div class="ct_stats_card">
                         <div class="ct_card_header">
                             <div class="ct_card_header_left">
@@ -118,64 +125,111 @@
                         </div>
                         <div class="ct_card_content">
                             <div class="ct_stat_row">
-                                <span class="ct_stat_label ct_tooltip">
+                                <span class="ct_stat_label">
                                     Phase
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Calibration state: WAITING → TRAINING → CALIBRATING → STABLE</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Calibration state: WAITING → TRAINING → CALIBRATING → STABLE</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_cal_phase" class="ct_stat_value">--</span>
                             </div>
                             <div class="ct_stat_row">
-                                <span class="ct_stat_label ct_tooltip">
+                                <span class="ct_stat_label">
                                     Next Trim
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Estimated generations until context truncation occurs</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Estimated generations until context truncation occurs</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
                             </div>
-                            <div class="ct_stat_row">
-                                <span class="ct_stat_label ct_tooltip">
-                                    Context
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Current actual size / target size in tokens</span>
-                                </span>
-                                <span id="ct_ov_context" class="ct_stat_value">
-                                    <span class="ct_context_combined">
-                                        <span id="ct_ov_actual_size_short" class="ct_actual">--</span>
-                                        <span class="ct_separator">/</span>
-                                        <span id="ct_ov_target_size_short" class="ct_target">--</span>
-                                    </span>
-                                </span>
-                            </div>
                         </div>
                     </div>
-    
-                    <!-- Summaries Card (simplified) -->
+
+                    <!-- Summaries Card (Version 2E: clean rows with percentage in header) -->
                     <div class="ct_stats_card">
                         <div class="ct_card_header">
                             <div class="ct_card_header_left">
                                 <i class="fa-solid fa-file-lines"></i>
                                 <span>Summaries</span>
                             </div>
+                            <div class="ct_card_header_right">
+                                <span id="ct_ov_summary_coverage" class="ct_coverage_indicator ct_coverage_none">--</span>
+                            </div>
                         </div>
                         <div class="ct_card_content">
                             <div class="ct_stat_row">
-                                <span class="ct_stat_label ct_tooltip">
-                                    Progress
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Summarized messages / total truncated messages</span>
+                                <span class="ct_stat_label">
+                                    Excluded
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Messages removed from context to stay within token limits</span>
+                                    </span>
                                 </span>
-                                <span id="ct_ov_sum_progress" class="ct_stat_value">
-                                    <span id="ct_ov_sum_done">--</span> / <span id="ct_ov_sum_total">--</span>
-                                </span>
+                                <span id="ct_ov_excluded_count" class="ct_stat_value">-- messages</span>
                             </div>
                             <div class="ct_stat_row">
-                                <span class="ct_stat_label ct_tooltip">
-                                    In Context
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Messages still in active context (not truncated)</span>
+                                <span class="ct_stat_label">
+                                    Summarized
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Excluded messages with summaries injected for continuity</span>
+                                    </span>
                                 </span>
-                                <span id="ct_ov_sum_active" class="ct_stat_value">--</span>
+                                <span id="ct_ov_summarized_count" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">
+                                    Pending
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Excluded messages awaiting summarization</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_pending_count" class="ct_stat_value">--</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">
+                                    Dropped
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Summaries excluded due to token cap (newest prioritized)</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_dropped_count" class="ct_stat_value ct_text_red">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Vector Memory Card - Only shown when Qdrant is enabled -->
+                    <div id="ct_vector_memory_card" class="ct_stats_card" style="display: none;">
+                        <div class="ct_card_header">
+                            <div class="ct_card_header_left">
+                                <i class="fa-solid fa-database"></i>
+                                <span>Vector Memory</span>
+                            </div>
+                        </div>
+                        <div class="ct_card_content">
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">
+                                    Stored
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Total chunks/vectors stored in this collection</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_vector_stored" class="ct_stat_value">-- chunks</span>
+                            </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">
+                                    Buffer
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Messages currently buffered, waiting to be chunked</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_vector_buffer" class="ct_stat_value">-- msgs</span>
                             </div>
                         </div>
                     </div>
@@ -190,50 +244,62 @@
                     <div class="ct_advanced_content" id="ct_advanced_content" style="display: none;">
                         <div class="ct_advanced_grid">
                             <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
+                                <span class="ct_advanced_label">
                                     Correction
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Learned multiplier for token estimation accuracy (1.0 = perfect)</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Learned multiplier for token estimation accuracy (1.0 = perfect)</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_correction" class="ct_advanced_value">--</span>
                             </div>
                             <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
+                                <span class="ct_advanced_label">
                                     Trunc. Index
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Message index where truncation begins (0 = no truncation)</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Message index where truncation begins (0 = no truncation)</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_trunc_index" class="ct_advanced_value">--</span>
                             </div>
                             <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
-                                    Msg Changes
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Message deletions since stable state. Recalibrates at 3.</span>
-                                </span>
-                                <span id="ct_ov_deletion_count" class="ct_advanced_value ct_text_green">0/3</span>
-                            </div>
-                            <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
-                                    Cal. Progress
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Progress toward stable calibration</span>
+                                <span class="ct_advanced_label">
+                                    Training Prog.
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Progress through training phase (2 generations needed)</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_cal_progress" class="ct_advanced_value">--</span>
                             </div>
                             <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
+                                <span class="ct_advanced_label">
+                                    Calibration Prog.
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Consecutive stable generations (5 required for STABLE state)</span>
+                                    </span>
+                                </span>
+                                <span id="ct_ov_stable_count" class="ct_advanced_value">0/5</span>
+                            </div>
+                            <div class="ct_advanced_item">
+                                <span class="ct_advanced_label">
                                     Difference
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Actual size minus target size</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Actual size minus target size</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_difference" class="ct_advanced_value">--</span>
                             </div>
                             <div class="ct_advanced_item">
-                                <span class="ct_advanced_label ct_tooltip">
+                                <span class="ct_advanced_label">
                                     Room Left
-                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                                    <span class="ct_tooltip_text">Tokens remaining before target exceeded</span>
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">Tokens remaining before target exceeded</span>
+                                    </span>
                                 </span>
                                 <span id="ct_ov_room_left" class="ct_advanced_value">--</span>
                             </div>
@@ -261,19 +327,14 @@
                 <div class="ct_overview_section">
                     <h4><i class="fa-solid fa-bolt"></i> Quick Actions</h4>
                     <div class="ct_button_row">
-                        <button id="ct_ov_reset" class="menu_button" title="Reset truncation index and restart adaptive learning">
-                            <i class="fa-solid fa-rotate-left"></i> Reset
+                        <button id="ct_ov_reset_all" class="menu_button" title="Reset truncation and calibration for a clean slate">
+                            <i class="fa-solid fa-rotate-left"></i> Reset All
                         </button>
-                        <button id="ct_ov_recalibrate" class="menu_button" title="Reset calibration and start training from scratch">
-                            <i class="fa-solid fa-sync"></i> Recalibrate
-                        </button>
-                        <button id="ct_ov_summarize" class="menu_button" title="Summarize all messages without summaries">
-                            <i class="fa-solid fa-compress"></i> Summarize All
-                        </button>
-                        <button id="ct_ov_stop_summarize" class="menu_button menu_button_danger" title="Stop the current summarization queue" style="display: none;">
-                            <i class="fa-solid fa-stop"></i> Stop
+                        <button id="ct_ov_summarize" class="menu_button ct_action_button" data-action="summarize" title="Summarize all messages without summaries">
+                            <i class="fa-solid fa-compress"></i> <span>Summarize All</span>
                         </button>
                     </div>
+                    <div id="ct_ov_reset_all_status" class="ct_status_message" style="margin-top: 8px;"></div>
                 </div>
 
             </div>
@@ -290,6 +351,8 @@
                         <span class="ct_tooltip_text">Master switch for context truncation. When enabled, messages are excluded from context once target size is reached.</span>
                     </span>
                 </div>
+                
+
 
                 <hr class="ct_section_divider">
 
@@ -311,6 +374,30 @@
                         <span class="ct_setting_value"><span id="ct_target_size_display">--</span> tokens</span>
                     </div>
                     <input id="ct_target_size" class="text_pole" type="number" min="1000" max="200000" step="1000" />
+                </div>
+
+                <div class="ct_compact_checkbox">
+                    <input id="ct_auto_limit_summaries" type="checkbox" checked />
+                    <label for="ct_auto_limit_summaries">Auto-Limit Summaries</label>
+                    <span class="ct_tooltip ct_tooltip_right">
+                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                        <span class="ct_tooltip_text">Automatically limits summary injection to 20% of target budget. Oldest summaries dropped when limit reached.</span>
+                    </span>
+                    <span id="ct_auto_limit_value" class="ct_setting_value" style="margin-left: 8px;">~9,600 tokens</span>
+                </div>
+
+                <div id="ct_manual_summary_limit" class="ct_compact_setting" style="display: none;">
+                    <div class="ct_setting_header">
+                        <span class="ct_setting_label">
+                            Max Summary Tokens
+                            <span class="ct_tooltip">
+                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                <span class="ct_tooltip_text">Manual token limit for summary injection (0 = unlimited)</span>
+                            </span>
+                        </span>
+                        <span id="ct_max_summary_injection_tokens_display" class="ct_setting_value">10000</span>
+                    </div>
+                    <input id="ct_max_summary_injection_tokens" class="ct_compact_slider" type="range" min="0" max="20000" step="500" value="10000" />
                 </div>
 
                 <div class="ct_compact_checkbox">
@@ -368,15 +455,76 @@
                 </div>
 
                 <div class="ct_compact_input">
-                    <label for="ct_connection_profile">
-                        Connection Profile
+                    <label for="ct_summary_endpoint_url">
+                        Summary Endpoint (OpenAI-compatible)
                         <span class="ct_tooltip">
                             <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                            <span class="ct_tooltip_text">Use a different model for summarization. "Same as Current" uses your main model.</span>
+                            <span class="ct_tooltip_text">Optional OpenAI-compatible POST endpoint to generate summaries. Leave empty to use SillyTavern's model.</span>
                         </span>
                     </label>
-                    <select id="ct_connection_profile" class="text_pole"></select>
+                    <input id="ct_summary_endpoint_url" class="text_pole" type="text" placeholder="https://example.com/v1/chat/completions" />
+                    <input id="ct_summary_endpoint_api_key" class="text_pole" type="password" placeholder="Optional: Bearer API key" />
+                    <div class="ct_button_row">
+                        <button id="ct_summary_endpoint_test" class="menu_button" title="Test summary endpoint">
+                            <i class="fa-solid fa-vial"></i> Test Summary Endpoint
+                        </button>
+                    </div>
+                    <div id="ct_summary_endpoint_status" class="ct_status_message" style="margin-top: 8px;"></div>
                 </div>
+
+                <!-- New summarization request controls: timeout, delay, retries -->
+                <div class="ct_compact_setting">
+                    <div class="ct_setting_header">
+                        <span class="ct_setting_label">
+                            Request Timeout (s)
+                            <span class="ct_tooltip">
+                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                <span class="ct_tooltip_text">Maximum time to wait for the summary endpoint (seconds).</span>
+                            </span>
+                        </span>
+                        <span id="ct_summary_timeout_display" class="ct_setting_value">15s</span>
+                    </div>
+                    <div class="ct_slider_wrapper">
+                        <input id="ct_summary_timeout" type="range" min="5000" max="60000" step="1000" value="15000" />
+                    </div>
+                </div>
+
+                <div class="ct_compact_setting">
+                    <div class="ct_setting_header">
+                        <span class="ct_setting_label">
+                            Request Delay (ms)
+                            <span class="ct_tooltip">
+                                <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                <span class="ct_tooltip_text">Delay between consecutive summary requests to avoid endpoint overload.</span>
+                            </span>
+                        </span>
+                        <span id="ct_summary_delay_display" class="ct_setting_value">500ms</span>
+                    </div>
+                    <div class="ct_slider_wrapper">
+                        <input id="ct_summary_delay" type="range" min="100" max="2000" step="100" value="500" />
+                    </div>
+                </div>
+
+                <div class="ct_compact_setting">
+                                <div class="ct_setting_header">
+                                    <span class="ct_setting_label">
+                                        Max Retries
+                                        <span class="ct_tooltip">
+                                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                            <span class="ct_tooltip_text">Maximum retry attempts for transient errors (503/timeout).</span>
+                                        </span>
+                                    </span>
+                                    <span class="ct_setting_value">
+                                        <select id="ct_summary_retries">
+                                            <option value="1">1</option>
+                                            <option value="2">2</option>
+                                            <option value="3" selected>3</option>
+                                            <option value="5">5</option>
+                                        </select>
+                                    </span>
+                                </div>
+                            </div>
+
 
                 <div class="ct_compact_setting">
                     <div class="ct_setting_header">
@@ -396,19 +544,14 @@
 
                 <!-- Quick Actions -->
                 <div class="ct_button_row">
-                    <button id="ct_reset" class="menu_button" title="Reset truncation index and restart adaptive learning">
-                        <i class="fa-solid fa-rotate-left"></i> Reset
+                    <button id="ct_reset_all" class="menu_button" title="Reset truncation and calibration for a clean slate">
+                        <i class="fa-solid fa-rotate-left"></i> Reset All
                     </button>
-                    <button id="ct_recalibrate" class="menu_button" title="Reset calibration and start training from scratch">
-                        <i class="fa-solid fa-sync"></i> Recalibrate
-                    </button>
-                    <button id="ct_summarize_all" class="menu_button" title="Summarize all messages without summaries">
-                        <i class="fa-solid fa-compress"></i> Summarize All
-                    </button>
-                    <button id="ct_stop_summarize" class="menu_button menu_button_danger" title="Stop the current summarization queue" style="display: none;">
-                        <i class="fa-solid fa-stop"></i> Stop
+                    <button id="ct_summarize_all" class="menu_button ct_action_button" data-action="summarize" title="Summarize all messages without summaries">
+                        <i class="fa-solid fa-compress"></i> <span>Summarize All</span>
                     </button>
                 </div>
+                <div id="ct_reset_all_status" class="ct_status_message" style="margin-top: 8px;"></div>
 
                 <hr class="ct_section_divider">
 
@@ -445,6 +588,22 @@
                             <span id="ct_min_keep_display" class="ct_setting_value">10</span>
                         </div>
                         <input id="ct_min_keep" class="ct_compact_slider" type="range" min="1" max="100" step="1" value="10" />
+                    </div>
+
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Summarization Delay
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Don't summarize messages within N positions from end. Allows natural summarization over time while roleplaying.</span>
+                                </span>
+                            </span>
+                            <span id="ct_summarization_delay_display" class="ct_setting_value">10</span>
+                        </div>
+                        <div class="ct_slider_wrapper">
+                            <input id="ct_summarization_delay" type="range" min="0" max="50" step="1" value="10" />
+                        </div>
                     </div>
 
                     <div class="ct_compact_checkbox">
@@ -546,42 +705,20 @@
 
                 <hr class="ct_section_divider">
 
-                <!-- Auto-Save Settings -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-floppy-disk"></i>
-                    <span>Auto-Save</span>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_auto_save_memories" type="checkbox" checked />
-                    <label for="ct_auto_save_memories">Auto-Save Memories</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Automatically save messages to Qdrant as conversations happen.</span>
-                    </span>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_save_user_messages" type="checkbox" checked />
-                    <label for="ct_save_user_messages">Save User Messages</label>
-                </div>
-
-                <div class="ct_compact_checkbox">
-                    <input id="ct_save_char_messages" type="checkbox" checked />
-                    <label for="ct_save_char_messages">Save Character Messages</label>
-                </div>
-
                 <hr class="ct_section_divider">
 
                 <!-- Quick Actions -->
                 <div class="ct_button_row">
-                    <button id="ct_index_chats" class="menu_button" title="Index all messages from current chat">
-                        <i class="fa-solid fa-database"></i> Index Chat
+                    <button id="ct_index_chats" class="menu_button ct_action_button" data-action="index" title="Index all messages from current chat">
+                        <i class="fa-solid fa-database"></i> <span>Index Chat</span>
                     </button>
                     <button id="ct_delete_collection" class="menu_button menu_button_danger" title="Delete all memories for this chat">
                         <i class="fa-solid fa-trash"></i> Delete Collection
                     </button>
                 </div>
+                <div id="ct_delete_collection_status" class="ct_status_message" style="margin-top: 8px;"></div>
+                <div id="ct_index_status" class="ct_status_message" style="margin-top: 4px;"></div>
+                <div id="ct_index_status" class="ct_status_message" style="margin-top: 4px;"></div>
 
                 <hr class="ct_section_divider">
 
@@ -591,7 +728,75 @@
                     <i class="fa-solid fa-chevron-down"></i>
                 </div>
                 <div class="ct_advanced_content" id="ct_qdrant_advanced_content" style="display: none;">
-                    
+
+                    <!-- Chunk Settings (moved from top-level) -->
+                    <div class="ct_section_header" style="margin-top: 0;">
+                        <i class="fa-solid fa-layer-group"></i>
+                        <span>Chunk Settings</span>
+                    </div>
+
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Chunk Min Size
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Minimum characters before flushing chunk to Qdrant</span>
+                                </span>
+                            </span>
+                            <span id="ct_chunk_min_display" class="ct_setting_value">1200 chars</span>
+                        </div>
+                        <input id="ct_chunk_min_size" class="ct_compact_slider" type="range" min="500" max="2000" step="100" value="1200" />
+                    </div>
+
+                    <div class="ct_compact_setting">
+                        <div class="ct_setting_header">
+                            <span class="ct_setting_label">
+                                Chunk Max Size
+                                <span class="ct_tooltip">
+                                    <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                    <span class="ct_tooltip_text">Maximum characters before forcing chunk flush</span>
+                                </span>
+                            </span>
+                            <span id="ct_chunk_max_display" class="ct_setting_value">1500 chars</span>
+                        </div>
+                        <input id="ct_chunk_max_size" class="ct_compact_slider" type="range" min="1000" max="3000" step="100" value="1500" />
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_account_qdrant_tokens" type="checkbox" checked />
+                        <label for="ct_account_qdrant_tokens">Account for Qdrant Tokens</label>
+                        <span class="ct_tooltip ct_tooltip_right">
+                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                            <span class="ct_tooltip_text">Subtract Qdrant injection tokens from target context size</span>
+                        </span>
+                    </div>
+
+                    <!-- Auto-Save Settings (moved from top-level) -->
+                    <div class="ct_section_header">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>Auto-Save</span>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_auto_save_memories" type="checkbox" checked />
+                        <label for="ct_auto_save_memories">Auto-Save Memories</label>
+                        <span class="ct_tooltip ct_tooltip_right">
+                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                            <span class="ct_tooltip_text">Automatically save messages to Qdrant as conversations happen.</span>
+                        </span>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_save_user_messages" type="checkbox" checked />
+                        <label for="ct_save_user_messages">Save User Messages</label>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_save_char_messages" type="checkbox" checked />
+                        <label for="ct_save_char_messages">Save Character Messages</label>
+                    </div>
+
                     <!-- Memory Retrieval Settings -->
                     <div class="ct_section_header" style="margin-top: 0;">
                         <i class="fa-solid fa-search"></i>
@@ -726,6 +931,7 @@
                         </span>
                     </div>
 
+
                     <div class="ct_compact_checkbox">
                         <input id="ct_debug_qdrant" type="checkbox" />
                         <label for="ct_debug_qdrant">Debug Mode</label>
@@ -739,84 +945,6 @@
 
             </div>
 
-            <!-- ==================== SYNERGY TAB ==================== -->
-            <div class="ct_tab_content" data-tab="synergy">
-                
-                <div class="ct_info_box">
-                    <i class="fa-solid fa-info-circle"></i>
-                    <span>Synergy features combine truncation and Qdrant memory. Requires both systems enabled.</span>
-                </div>
-
-                <hr class="ct_section_divider">
-
-                <!-- Summary-as-Chunk -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-file-zipper"></i>
-                    <span>Summary-as-Chunk</span>
-                </div>
-                
-                <div class="ct_compact_checkbox">
-                    <input id="ct_use_summaries_for_qdrant" type="checkbox" />
-                    <label for="ct_use_summaries_for_qdrant">Use Summaries for Qdrant</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Index AI-generated summaries instead of raw messages. Faster/cheaper but may lose detail.</span>
-                    </span>
-                </div>
-
-                <hr class="ct_section_divider">
-
-                <!-- Memory-Aware Summarization -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-brain"></i>
-                    <span>Memory-Aware Summarization</span>
-                </div>
-                
-                <div class="ct_compact_checkbox">
-                    <input id="ct_memory_aware_summaries" type="checkbox" />
-                    <label for="ct_memory_aware_summaries">Include Memories in Context</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Retrieve relevant memories when generating summaries for better context.</span>
-                    </span>
-                </div>
-
-                <hr class="ct_section_divider">
-
-                <!-- Token Accounting -->
-                <div class="ct_section_header">
-                    <i class="fa-solid fa-calculator"></i>
-                    <span>Token Accounting</span>
-                </div>
-                
-                <div class="ct_compact_checkbox">
-                    <input id="ct_account_qdrant_tokens" type="checkbox" checked />
-                    <label for="ct_account_qdrant_tokens">Account for Qdrant Tokens</label>
-                    <span class="ct_tooltip ct_tooltip_right">
-                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                        <span class="ct_tooltip_text">Adjust truncation target to account for injected Qdrant memories. Prevents context overflow.</span>
-                    </span>
-                </div>
-
-                <hr class="ct_section_divider">
-
-                <!-- Advanced Settings (Collapsible) -->
-                <div class="ct_advanced_toggle" id="ct_synergy_advanced_toggle">
-                    <span><i class="fa-solid fa-cog"></i> Advanced Settings</span>
-                    <i class="fa-solid fa-chevron-down"></i>
-                </div>
-                <div class="ct_advanced_content" id="ct_synergy_advanced_content" style="display: none;">
-                    <div class="ct_compact_checkbox">
-                        <input id="ct_debug_synergy" type="checkbox" />
-                        <label for="ct_debug_synergy">Debug Mode</label>
-                        <span class="ct_tooltip ct_tooltip_right">
-                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                            <span class="ct_tooltip_text">Enable console logging for synergy features (token accounting, summary-as-chunk)</span>
-                        </span>
-                    </div>
-                </div>
-
-            </div>
 
         </div>
     </div>
