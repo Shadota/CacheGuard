@@ -168,6 +168,11 @@ let STABLE_COUNT = 0;          // Consecutive stable generations
 let LAST_CORRECTION_FACTOR = 1.0;  // Previous factor for convergence detection
 let RETRAIN_COUNT = 0;         // Generations in retraining phase
 let LAST_STABLE_CHAT_LENGTH = 0;  // Chat length when entering STABLE state
+
+// V33: Cache last valid raw prompt for fallback during intercept
+let CACHED_RAW_PROMPT = null;
+let CACHED_RAW_PROMPT_CHAT_LENGTH = 0;
+
 const TRAINING_GENERATIONS = 2;  // Generations needed to train correction factor (reduced from 3)
 const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE state
 
@@ -599,6 +604,15 @@ function load_truncation_index() {
         RETRAIN_COUNT = chat_metadata[MODULE_NAME].retrain_count || 0;
         QDRANT_TOKEN_HISTORY = chat_metadata[MODULE_NAME].qdrant_token_history || [];
         LAST_STABLE_CHAT_LENGTH = chat_metadata[MODULE_NAME].last_stable_chat_length || 0;
+
+        // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
+        // initialize it to current chat length to prevent constant recalculation
+        if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH === 0) {
+            const currentChatLength = getContext().chat?.length || 0;
+            LAST_STABLE_CHAT_LENGTH = currentChatLength;
+            debug(`Fixed legacy STABLE state: initialized LAST_STABLE_CHAT_LENGTH to ${currentChatLength}`);
+        }
+
         debug(`Loaded calibration state: ${CALIBRATION_STATE}, stable: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
     } else {
         // V32 FIX: If correction_factor was loaded but calibration_state wasn't,
@@ -887,6 +901,18 @@ function calculate_truncation_index() {
     
     // Build message token map from last prompt for accurate estimation
     let last_raw_prompt = get_last_prompt_raw();
+
+    // V33: Fallback to cached raw prompt if unavailable but chat length matches
+    if (!last_raw_prompt) {
+        const currentChatLength = getContext().chat?.length || 0;
+        if (CACHED_RAW_PROMPT && CACHED_RAW_PROMPT_CHAT_LENGTH === currentChatLength) {
+            last_raw_prompt = CACHED_RAW_PROMPT;
+            debug_trunc(`Using cached raw prompt for fallback (${last_raw_prompt.length} chars, chat length: ${currentChatLength})`);
+        } else {
+            debug_trunc(`No cached prompt or chat length mismatch (${CACHED_RAW_PROMPT_CHAT_LENGTH} vs ${currentChatLength})`);
+        }
+    }
+
     let message_token_map = get_prompt_message_tokens_from_raw(last_raw_prompt, chat);
     
     // Calculate non-chat budget from the current raw prompt
@@ -1145,23 +1171,31 @@ function update_message_inclusion_flags() {
     // Only allow recalculation in WAITING, INITIAL_TRAINING, or STABLE states
     const lockIndex = CALIBRATION_STATE === 'CALIBRATING' || CALIBRATION_STATE === 'RETRAINING';
 
-    if (lockIndex && TRUNCATION_INDEX !== null) {
-        // Index is locked - only allow batch-aligned increments when context overflows
-        const newMessages = chatLength - (LAST_STABLE_CHAT_LENGTH || chatLength);
-        if (newMessages > 0) {
-            // New messages added - check if we need to trim
+    if (lockIndex) {
+        if (TRUNCATION_INDEX !== null) {
+            // V33: Robust index locking - use actual kept message count, not chat length delta
+            const keptMessages = chatLength - TRUNCATION_INDEX;
             const batchSize = get_settings('batch_size');
-            const shouldTrim = newMessages >= batchSize;
-            if (shouldTrim) {
-                // Move index by exactly batch_size
-                TRUNCATION_INDEX = TRUNCATION_INDEX + batchSize;
-                debug_trunc(`LOCKED: Batch trim triggered, index ${TRUNCATION_INDEX - batchSize}→${TRUNCATION_INDEX}`);
-                LAST_STABLE_CHAT_LENGTH = chatLength;
+            const minKeep = get_settings('min_messages_to_keep');
+
+            // Only trim if we'd still keep minimum messages
+            if (keptMessages > minKeep + batchSize) {
+                // Check if we need a batch trim based on context overflow
+                // Use the ACTUAL context size from last generation, not estimate
+                const targetSize = get_settings('target_context_size');
+                if (LAST_ACTUAL_PROMPT_SIZE > targetSize * 1.10) {  // 10% over target
+                    TRUNCATION_INDEX = TRUNCATION_INDEX + batchSize;
+                    LAST_STABLE_CHAT_LENGTH = chatLength;
+                    debug_trunc(`LOCKED: Batch trim triggered (10% over target), index ${TRUNCATION_INDEX - batchSize}→${TRUNCATION_INDEX}`);
+                } else {
+                    debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (under 10% threshold)`);
+                }
             } else {
-                debug_trunc(`LOCKED: ${newMessages} new messages, waiting for batch (${batchSize})`);
+                debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (would exceed minKeep)`);
             }
         } else {
-            debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (state: ${CALIBRATION_STATE})`);
+            // Locked but no index yet - don't recalculate during calibration
+            debug_trunc(`LOCKED: No index yet during ${CALIBRATION_STATE}, skipping recalculation`);
         }
     } else if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH > 0) {
         const newMessages = chatLength - LAST_STABLE_CHAT_LENGTH;
@@ -1425,6 +1459,14 @@ function update_status_display() {
     // Get the last prompt size
     const last_raw_prompt = get_last_prompt_raw();
     debug(`  last_raw_prompt exists: ${!!last_raw_prompt}`);
+
+    // V33: Cache valid raw prompt for fallback during calculate_truncation_index
+    if (last_raw_prompt) {
+        CACHED_RAW_PROMPT = last_raw_prompt;
+        CACHED_RAW_PROMPT_CHAT_LENGTH = getContext().chat?.length || 0;
+        debug_trunc(`Cached raw prompt (${last_raw_prompt.length} chars) for fallback`);
+    }
+
     if (!last_raw_prompt) {
         $display.hide();
         debug('  No raw prompt, hiding display');
@@ -1657,10 +1699,13 @@ function calibrate_target_size(actualSize) {
         case 'INITIAL_TRAINING':
             // Wait for correction factor to stabilize
             GENERATION_COUNT++;
-            
+
             if (GENERATION_COUNT >= TRAINING_GENERATIONS) {
                 CALIBRATION_STATE = 'CALIBRATING';
                 GENERATION_COUNT = 0;
+                // V33: Initialize chat length tracking for index locking
+                LAST_STABLE_CHAT_LENGTH = getContext().chat?.length || 0;
+                debug_trunc(`Entering CALIBRATING with ${LAST_STABLE_CHAT_LENGTH} messages`);
                 // Calculate initial target based on learned correction factor
                 calculate_calibrated_target(maxContext, targetUtilization);
             }
@@ -1689,9 +1734,9 @@ function calibrate_target_size(actualSize) {
                     toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
                 }
             } else {
-                // Factor still changing - don't decay stable count as aggressively
-                // Only decay if factor is swinging wildly (> 5% change)
-                if (factorChange > 0.05) {
+                // Factor still changing - decay stable count only for very large swings
+                // Relaxed threshold: only decay if factor is swinging extremely wildly (> 10% change)
+                if (factorChange > 0.10) {
                     STABLE_COUNT = Math.max(0, STABLE_COUNT - 1);
                     debug_trunc(`Factor unstable (${(factorChange * 100).toFixed(1)}% change), stable count: ${STABLE_COUNT}`);
                 }
