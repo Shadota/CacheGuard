@@ -165,6 +165,7 @@ let INDEXING_ABORT_CONTROLLER = null;
 let CALIBRATION_STATE = 'WAITING';
 let GENERATION_COUNT = 0;      // Generations in current phase
 let STABLE_COUNT = 0;          // Consecutive stable generations
+let LAST_CORRECTION_FACTOR = 1.0;  // Previous factor for convergence detection
 let RETRAIN_COUNT = 0;         // Generations in retraining phase
 let LAST_STABLE_CHAT_LENGTH = 0;  // Chat length when entering STABLE state
 const TRAINING_GENERATIONS = 2;  // Generations needed to train correction factor (reduced from 3)
@@ -1140,7 +1141,29 @@ function update_message_inclusion_flags() {
     // V33 BUG-002 FIX: In STABLE state, only recalculate if new messages were added
     const chatLength = ctx.chat?.length || 0;
 
-    if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH > 0) {
+    // V34 FIX: Lock index during CALIBRATING and RETRAINING states
+    // Only allow recalculation in WAITING, INITIAL_TRAINING, or STABLE states
+    const lockIndex = CALIBRATION_STATE === 'CALIBRATING' || CALIBRATION_STATE === 'RETRAINING';
+
+    if (lockIndex && TRUNCATION_INDEX !== null) {
+        // Index is locked - only allow batch-aligned increments when context overflows
+        const newMessages = chatLength - (LAST_STABLE_CHAT_LENGTH || chatLength);
+        if (newMessages > 0) {
+            // New messages added - check if we need to trim
+            const batchSize = get_settings('batch_size');
+            const shouldTrim = newMessages >= batchSize;
+            if (shouldTrim) {
+                // Move index by exactly batch_size
+                TRUNCATION_INDEX = TRUNCATION_INDEX + batchSize;
+                debug_trunc(`LOCKED: Batch trim triggered, index ${TRUNCATION_INDEX - batchSize}→${TRUNCATION_INDEX}`);
+                LAST_STABLE_CHAT_LENGTH = chatLength;
+            } else {
+                debug_trunc(`LOCKED: ${newMessages} new messages, waiting for batch (${batchSize})`);
+            }
+        } else {
+            debug_trunc(`LOCKED: Index stays at ${TRUNCATION_INDEX} (state: ${CALIBRATION_STATE})`);
+        }
+    } else if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH > 0) {
         const newMessages = chatLength - LAST_STABLE_CHAT_LENGTH;
 
         if (newMessages <= 0) {
@@ -1153,8 +1176,13 @@ function update_message_inclusion_flags() {
             LAST_STABLE_CHAT_LENGTH = chatLength;
         }
     } else {
-        // Not in STABLE or first entry - always recalculate
+        // Not locked and not in STABLE - recalculate (WAITING or INITIAL_TRAINING)
         TRUNCATION_INDEX = calculate_truncation_index();
+        // Set LAST_STABLE_CHAT_LENGTH when we first calculate the index
+        if (TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0) {
+            LAST_STABLE_CHAT_LENGTH = chatLength;
+            debug_trunc(`Initial index set to ${TRUNCATION_INDEX}, tracking ${chatLength} messages`);
+        }
         save_truncation_index();
     }
     
@@ -1427,6 +1455,16 @@ function update_status_display() {
     const predictionError = Math.abs(actualSize - LAST_PREDICTED_SIZE) / LAST_PREDICTED_SIZE;
     const skipFactorUpdate = CALIBRATION_STATE === 'STABLE' || predictionError < 0.01;
 
+    // V34 FIX: Skip factor update entirely if no raw prompt
+    // This prevents estimation-based index jumps
+    if (!last_raw_prompt) {
+        debug_trunc('No raw prompt available - skipping factor update to preserve stability');
+        // Still update the memory display and overview
+        update_memory_display();
+        update_overview_tab();
+        return;
+    }
+
     if (LAST_PREDICTED_SIZE > 0 && LAST_PREDICTED_CHAT_SIZE > 0 && !skipFactorUpdate) {
         // Analyze actual chat vs non-chat from current prompt
         const segments = get_prompt_chat_segments_from_raw(last_raw_prompt);
@@ -1629,10 +1667,20 @@ function calibrate_target_size(actualSize) {
             break;
             
         case 'CALIBRATING':
-            // Apply calibration and check if we're within tolerance
-            if (deviation <= tolerance) {
+            // V34 FIX: Use factor convergence for stability, not deviation
+            // Factor convergence is more stable than target deviation
+            const factorChange = Math.abs(CHAT_TOKEN_CORRECTION_FACTOR - LAST_CORRECTION_FACTOR);
+            const factorConverged = factorChange < 0.02;  // < 2% change = converged
+
+            // Update factor tracking
+            LAST_CORRECTION_FACTOR = CHAT_TOKEN_CORRECTION_FACTOR;
+
+            debug_trunc(`Factor convergence: ${(factorChange * 100).toFixed(2)}% change (threshold: 2%)`);
+
+            if (factorConverged) {
                 STABLE_COUNT++;
-                
+                debug_trunc(`Factor converged! Stable count: ${STABLE_COUNT}/${STABLE_THRESHOLD}`);
+
                 if (STABLE_COUNT >= STABLE_THRESHOLD) {
                     CALIBRATION_STATE = 'STABLE';
                     // V33: Track chat length for STABLE state locking
@@ -1641,15 +1689,14 @@ function calibrate_target_size(actualSize) {
                     toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
                 }
             } else {
-                // V34 FIX: More lenient decay - only decay if significantly over tolerance
-                const toleranceOvershoot = deviation - tolerance;
-                if (toleranceOvershoot > 0.03) {  // 3% overshoot threshold (was 1%)
-                    // Decay by 1 for moderate, 2 only for severe (>2x tolerance)
-                    const decayAmount = deviation > tolerance * 2.0 ? 2 : 1;
-                    STABLE_COUNT = Math.max(0, STABLE_COUNT - decayAmount);
-                    // Only recalculate target on significant overshoot
-                    calculate_calibrated_target(maxContext, targetUtilization);
+                // Factor still changing - don't decay stable count as aggressively
+                // Only decay if factor is swinging wildly (> 5% change)
+                if (factorChange > 0.05) {
+                    STABLE_COUNT = Math.max(0, STABLE_COUNT - 1);
+                    debug_trunc(`Factor unstable (${(factorChange * 100).toFixed(1)}% change), stable count: ${STABLE_COUNT}`);
                 }
+                // Don't recalculate target during calibration - just learn the factor
+                // calculate_calibrated_target() removed to prevent instability
             }
             break;
             
