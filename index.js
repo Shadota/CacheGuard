@@ -168,6 +168,7 @@ let STABLE_COUNT = 0;          // Consecutive stable generations
 let LAST_CORRECTION_FACTOR = 1.0;  // Previous factor for convergence detection
 let RETRAIN_COUNT = 0;         // Generations in retraining phase
 let LAST_STABLE_CHAT_LENGTH = 0;  // Chat length when entering STABLE state
+let CONSECUTIVE_DEVIATION_COUNT = 0;  // V33: Track consecutive high-deviation generations in STABLE
 
 // V33: Cache last valid raw prompt for fallback during intercept
 let CACHED_RAW_PROMPT = null;
@@ -604,6 +605,7 @@ function load_truncation_index() {
         RETRAIN_COUNT = chat_metadata[MODULE_NAME].retrain_count || 0;
         QDRANT_TOKEN_HISTORY = chat_metadata[MODULE_NAME].qdrant_token_history || [];
         LAST_STABLE_CHAT_LENGTH = chat_metadata[MODULE_NAME].last_stable_chat_length || 0;
+        CONSECUTIVE_DEVIATION_COUNT = chat_metadata[MODULE_NAME].consecutive_deviation_count || 0;  // V33
 
         // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
         // initialize it to current chat length to prevent constant recalculation
@@ -650,6 +652,7 @@ function save_truncation_index() {
     chat_metadata[MODULE_NAME].retrain_count = RETRAIN_COUNT;
     chat_metadata[MODULE_NAME].qdrant_token_history = QDRANT_TOKEN_HISTORY;
     chat_metadata[MODULE_NAME].last_stable_chat_length = LAST_STABLE_CHAT_LENGTH;
+    chat_metadata[MODULE_NAME].consecutive_deviation_count = CONSECUTIVE_DEVIATION_COUNT;  // V33
 
     debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
     saveMetadataDebounced();
@@ -1226,9 +1229,23 @@ function update_message_inclusion_flags() {
             // No new messages - keep cached truncation index for cache stability
             debug_trunc(`STABLE: No new messages, keeping TRUNCATION_INDEX at ${TRUNCATION_INDEX}`);
         } else {
-            // New messages added - recalculate and update tracking
-            debug_trunc(`STABLE: ${newMessages} new message(s), recalculating truncation`);
-            TRUNCATION_INDEX = calculate_truncation_index();
+            // V33 FIX: In STABLE state, do NOT recalculate from scratch
+            // Instead, keep existing index to preserve KV cache coherence
+            // Only advance index if we have concrete evidence of overflow
+            debug_trunc(`STABLE: ${newMessages} new message(s), preserving index for cache coherence`);
+            
+            // Only consider batch trim if we have actual prompt size data
+            // showing we're significantly over target (>10%)
+            const targetSize = get_settings('target_context_size');
+            if (LAST_ACTUAL_PROMPT_SIZE > targetSize * 1.10) {
+                const batchSize = get_settings('batch_size');
+                const oldIndex = TRUNCATION_INDEX;
+                TRUNCATION_INDEX = TRUNCATION_INDEX + batchSize;
+                debug_trunc(`STABLE: Batch trim triggered (10% over target), index ${oldIndex}→${TRUNCATION_INDEX}`);
+            } else {
+                debug_trunc(`STABLE: Index preserved at ${TRUNCATION_INDEX} (under threshold)`);
+            }
+            
             LAST_STABLE_CHAT_LENGTH = chatLength;
         }
     } else {
@@ -1658,10 +1675,11 @@ function reset_calibration() {
     RETRAIN_COUNT = 0;
     CHAT_TOKEN_CORRECTION_FACTOR = 1.0;
     LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
+    CONSECUTIVE_DEVIATION_COUNT = 0;  // V33
 
     debug('Calibration reset to WAITING');
     update_calibration_ui();
-    
+
     toastr.info('Calibration reset - will start when context threshold is reached', MODULE_NAME_FANCY);
 }
 
@@ -1781,13 +1799,26 @@ function calibrate_target_size(actualSize) {
             break;
             
         case 'STABLE':
-            // Monitor for destabilization
-            if (deviation > tolerance * 1.5) {  // Use 1.5x tolerance to avoid bouncing
-                CALIBRATION_STATE = 'RETRAINING';
-                RETRAIN_COUNT = 0;
-                STABLE_COUNT = 0;
-                LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
-                toastr.warning('Calibration destabilized - retraining...', MODULE_NAME_FANCY);
+            // V33 FIX: Require consecutive high deviations before destabilizing
+            // This prevents single-generation flukes from triggering RETRAINING
+            if (deviation > tolerance * 1.5) {
+                CONSECUTIVE_DEVIATION_COUNT++;
+                debug_trunc(`STABLE: High deviation detected (${(deviation * 100).toFixed(1)}%), count: ${CONSECUTIVE_DEVIATION_COUNT}/2`);
+
+                if (CONSECUTIVE_DEVIATION_COUNT >= 2) {
+                    CALIBRATION_STATE = 'RETRAINING';
+                    RETRAIN_COUNT = 0;
+                    STABLE_COUNT = 0;
+                    LAST_STABLE_CHAT_LENGTH = 0;
+                    CONSECUTIVE_DEVIATION_COUNT = 0;
+                    toastr.warning('Calibration destabilized - retraining...', MODULE_NAME_FANCY);
+                }
+            } else {
+                // Reset deviation count when within tolerance
+                if (CONSECUTIVE_DEVIATION_COUNT > 0) {
+                    debug_trunc(`STABLE: Deviation recovered, resetting count`);
+                }
+                CONSECUTIVE_DEVIATION_COUNT = 0;
             }
             break;
     }
