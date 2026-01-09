@@ -2853,7 +2853,7 @@ function update_prediction_display() {
     // REQ-008: Token accuracy display with tier indicator
     const $accuracy = $('#ct_ov_token_accuracy');
     if ($accuracy.length) {
-        const tierNames = { 1: 'API', 2: 'Local', 3: 'Learned', 4: 'Fallback' };
+        const tierNames = { 1: 'API', 2: 'SillyTavern', 3: 'Learned', 4: 'Fallback' };
         const tierName = tierNames[LAST_TOKEN_TIER] || '--';
 
         // Remove all state classes first

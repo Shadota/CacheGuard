@@ -145,7 +145,13 @@
                                 <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
                             </div>
                             <div class="ct_stat_row">
-                                <span class="ct_stat_label">Token Accuracy:</span>
+                                <span class="ct_stat_label">
+                                    Token Source
+                                    <span class="ct_tooltip">
+                                        <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                                        <span class="ct_tooltip_text">API: Backend tokenizer (learning phase) | SillyTavern: Built-in tokenizer (real-time) | Learned: Estimated from API | Fallback: Character-based (~85%)</span>
+                                    </span>
+                                </span>
                                 <span id="ct_ov_token_accuracy" class="ct_stat_value ct_text_dim">--</span>
                             </div>
                         </div>
@@ -612,10 +618,10 @@
 
                     <div class="ct_compact_checkbox">
                         <input id="ct_api_tokenizer_enabled" type="checkbox" />
-                        <label for="ct_api_tokenizer_enabled">Use API Tokenizer</label>
+                        <label for="ct_api_tokenizer_enabled">Learn Token Ratios from API</label>
                         <span class="ct_tooltip ct_tooltip_right">
                             <i class="fa-solid fa-circle-info ct_info_icon"></i>
-                            <span class="ct_tooltip_text">Query the API backend for accurate token counts on large prompts. Supports TabbyAPI and KoboldCPP.</span>
+                            <span class="ct_tooltip_text">After each generation, query the API backend (TabbyAPI/KoboldCPP) to learn accurate chars-per-token ratios. Improves estimated token counts when API is unavailable. Does not affect real-time truncation.</span>
                         </span>
                     </div>
 
