@@ -102,7 +102,8 @@ Recent chat always takes precedence over these notes.
     debug_truncation: false,
     debug_qdrant: false,
     debug_synergy: false,
-    
+    api_tokenizer_enabled: true,  // REQ-008: Use API backend for accurate token counts
+
     // ==================== QDRANT SETTINGS ====================
     qdrant_enabled: false,
     qdrant_url: "http://localhost:6333",
@@ -173,6 +174,13 @@ let CONSECUTIVE_DEVIATION_COUNT = 0;  // V33: Track consecutive high-deviation g
 // V33: Cache last valid raw prompt for fallback during intercept
 let CACHED_RAW_PROMPT = null;
 let CACHED_RAW_PROMPT_CHAT_LENGTH = 0;
+
+// REQ-008: API tokenizer state
+let LEARNED_CHARS_PER_TOKEN = 4.0;      // Learned from API responses, default to current
+let DETECTED_BACKEND_TYPE = null;        // 'tabby' | 'koboldcpp' | null
+let API_TOKENIZER_DISABLED_UNTIL = 0;    // Timestamp for temporary disable after errors
+let LAST_TOKEN_ACCURACY = null;          // Percentage for display
+let LAST_TOKEN_TIER = 0;                 // 1=API, 2=SillyTavern, 3=Learned, 4=Hardcoded
 
 const TRAINING_GENERATIONS = 2;  // Generations needed to train correction factor (reduced from 3)
 const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE state
@@ -348,26 +356,228 @@ function set_settings(key, value) {
 // SillyTavern's tokenizer returns 0 for inputs > ~200K chars
 const TOKENIZER_CHAR_LIMIT = 150000;  // Conservative limit
 
+// REQ-008: Synchronous token counting with tiered fallback
+// Note: TIER 1 (API) is async and handled separately in count_tokens_with_api()
+// This function handles TIER 2-4 synchronously for immediate results
 function count_tokens(text, padding = 0) {
     if (!text) return padding;
-    
+
     const ctx = getContext();
     const textLen = text.length;
-    
-    // For small inputs, use tokenizer directly
-    if (textLen <= TOKENIZER_CHAR_LIMIT) {
-        const result = ctx.getTokenCount(text, padding);
-        // Clear estimation flag when tokenizer works
+
+    // TIER 2: Try SillyTavern's tokenizer
+    const stResult = ctx.getTokenCount(text, padding);
+    if (stResult > 0) {
         USING_ESTIMATION_MODE = false;
-        return result;
+        LAST_TOKEN_TIER = 2;
+        debug_trunc(`[TOKENIZER] TIER 2 (SillyTavern): ${stResult} tokens`);
+        return stResult;
     }
-    
-    // For large inputs, use character-based estimate
-    // Average ratio is ~4 chars per token for English text
-    USING_ESTIMATION_MODE = true;  // SET FLAG
+
+    // TIER 3: Use learned ratio (if we have one from previous API calls)
+    if (LEARNED_CHARS_PER_TOKEN !== 4.0) {
+        USING_ESTIMATION_MODE = true;
+        LAST_TOKEN_TIER = 3;
+        const estimate = Math.floor(textLen / LEARNED_CHARS_PER_TOKEN) + padding;
+        debug_trunc(`[TOKENIZER] TIER 3 (Learned): ${textLen} chars → ${estimate} tokens (${LEARNED_CHARS_PER_TOKEN.toFixed(2)} chars/token)`);
+        return estimate;
+    }
+
+    // TIER 4: Hardcoded fallback (4 chars/token)
+    USING_ESTIMATION_MODE = true;
+    LAST_TOKEN_TIER = 4;
     const estimate = Math.floor(textLen / 4) + padding;
-    debug_trunc(`[TOKENIZER] Estimation mode: ${textLen} chars → ${estimate} tokens (4 chars/token)`);
+    debug_trunc(`[TOKENIZER] TIER 4 (Hardcoded): ${textLen} chars → ${estimate} tokens (4.00 chars/token)`);
     return estimate;
+}
+
+// REQ-008: Async token counting that tries API first (TIER 1)
+// Call this after generation for accurate counts
+async function count_tokens_with_api(text, padding = 0) {
+    if (!text) return padding;
+
+    const textLen = text.length;
+
+    // TIER 1: Try API tokenizer first (most accurate)
+    if (get_settings('api_tokenizer_enabled') && Date.now() >= API_TOKENIZER_DISABLED_UNTIL) {
+        const apiTokens = await count_tokens_via_api(text);
+        if (apiTokens && apiTokens > 0) {
+            USING_ESTIMATION_MODE = false;
+            LAST_TOKEN_TIER = 1;
+            LAST_TOKEN_ACCURACY = 100;  // API is ground truth
+            debug_trunc(`[TOKENIZER] TIER 1 (API): ${apiTokens} tokens`);
+            return apiTokens + padding;
+        }
+    }
+
+    // Fall through to synchronous tiers
+    return count_tokens(text, padding);
+}
+
+// REQ-008: Detect backend type from SillyTavern connection
+function detect_backend_type() {
+    if (DETECTED_BACKEND_TYPE) return DETECTED_BACKEND_TYPE;
+
+    try {
+        const ctx = getContext();
+        const mainApi = ctx.mainApi || '';
+
+        // Check mainApi string for hints
+        if (mainApi.toLowerCase().includes('tabby')) {
+            DETECTED_BACKEND_TYPE = 'tabby';
+            debug_trunc(`[API-TOK] Detected TabbyAPI from mainApi: ${mainApi}`);
+            return 'tabby';
+        }
+        if (mainApi.toLowerCase().includes('kobold')) {
+            DETECTED_BACKEND_TYPE = 'koboldcpp';
+            debug_trunc(`[API-TOK] Detected KoboldCPP from mainApi: ${mainApi}`);
+            return 'koboldcpp';
+        }
+
+        // Fallback: check textCompletionSettings for type hints
+        const settings = ctx.textCompletionSettings || {};
+        if (settings.type?.toLowerCase().includes('tabby')) {
+            DETECTED_BACKEND_TYPE = 'tabby';
+            return 'tabby';
+        }
+        if (settings.type?.toLowerCase().includes('kobold')) {
+            DETECTED_BACKEND_TYPE = 'koboldcpp';
+            return 'koboldcpp';
+        }
+
+        debug_trunc(`[API-TOK] Could not detect backend type from mainApi: ${mainApi}`);
+        return null;
+    } catch (e) {
+        debug_trunc(`[API-TOK] Error detecting backend: ${e.message}`);
+        return null;
+    }
+}
+
+// REQ-008: Get API server URL from SillyTavern
+function get_api_server_url() {
+    try {
+        const ctx = getContext();
+        if (typeof ctx.getTextGenServer === 'function') {
+            return ctx.getTextGenServer();
+        }
+        // Fallback: try textCompletionSettings
+        const settings = ctx.textCompletionSettings || {};
+        return settings.server_url || settings.api_server || null;
+    } catch (e) {
+        debug_trunc(`[API-TOK] Error getting server URL: ${e.message}`);
+        return null;
+    }
+}
+
+// REQ-008: Call TabbyAPI token encode endpoint
+async function tokenize_via_tabby(text, serverUrl) {
+    const url = `${serverUrl.replace(/\/+$/, '')}/v1/token/encode`;
+
+    const headers = { 'Content-Type': 'application/json' };
+
+    // Try to get API key from SillyTavern settings
+    try {
+        const ctx = getContext();
+        const apiKey = ctx.textCompletionSettings?.api_key_tabby;
+        if (apiKey) {
+            headers['x-api-key'] = apiKey;
+        }
+    } catch (e) { /* ignore */ }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            text: text,
+            add_bos_token: true,
+            encode_special_tokens: true
+        }),
+        signal: AbortSignal.timeout(10000)
+    });
+
+    if (!response.ok) {
+        throw new Error(`TabbyAPI tokenize failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.length || 0;
+}
+
+// REQ-008: Call KoboldCPP tokencount endpoint
+async function tokenize_via_kobold(text, serverUrl) {
+    const url = `${serverUrl.replace(/\/+$/, '')}/api/extra/tokencount`;
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: text }),
+        signal: AbortSignal.timeout(10000)
+    });
+
+    if (!response.ok) {
+        throw new Error(`KoboldCPP tokencount failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.value || 0;
+}
+
+// REQ-008: Main API tokenizer function
+async function count_tokens_via_api(text) {
+    // Check if disabled
+    if (!get_settings('api_tokenizer_enabled')) {
+        return null;
+    }
+
+    // Check temporary disable (after errors)
+    if (Date.now() < API_TOKENIZER_DISABLED_UNTIL) {
+        return null;
+    }
+
+    const serverUrl = get_api_server_url();
+    if (!serverUrl) {
+        debug_trunc('[API-TOK] No server URL available');
+        return null;
+    }
+
+    const backendType = detect_backend_type();
+    if (!backendType) {
+        debug_trunc('[API-TOK] Unknown backend type, skipping API tokenizer');
+        return null;
+    }
+
+    try {
+        let tokenCount;
+
+        if (backendType === 'tabby') {
+            tokenCount = await tokenize_via_tabby(text, serverUrl);
+        } else if (backendType === 'koboldcpp') {
+            tokenCount = await tokenize_via_kobold(text, serverUrl);
+        } else {
+            return null;
+        }
+
+        // Validate response
+        if (!tokenCount || tokenCount <= 0 || tokenCount > text.length) {
+            debug_trunc(`[API-TOK] Invalid token count: ${tokenCount}`);
+            return null;
+        }
+
+        // Learn the chars/token ratio
+        const newRatio = text.length / tokenCount;
+        LEARNED_CHARS_PER_TOKEN = (0.8 * LEARNED_CHARS_PER_TOKEN) + (0.2 * newRatio);
+        LEARNED_CHARS_PER_TOKEN = Math.max(3.5, Math.min(5.5, LEARNED_CHARS_PER_TOKEN));
+
+        debug_trunc(`[API-TOK] ${backendType}: ${tokenCount} tokens (${newRatio.toFixed(2)} chars/tok, learned: ${LEARNED_CHARS_PER_TOKEN.toFixed(2)})`);
+
+        return tokenCount;
+
+    } catch (e) {
+        debug_trunc(`[API-TOK] Error: ${e.message}`);
+        // Disable for 5 minutes after error
+        API_TOKENIZER_DISABLED_UNTIL = Date.now() + (5 * 60 * 1000);
+        return null;
+    }
 }
 
 // Connection profile helpers removed — summarization now uses an independent OpenAI-compatible endpoint (ct_summary_endpoint_url)
@@ -617,6 +827,7 @@ function load_truncation_index() {
         QDRANT_TOKEN_HISTORY = chat_metadata[MODULE_NAME].qdrant_token_history || [];
         LAST_STABLE_CHAT_LENGTH = chat_metadata[MODULE_NAME].last_stable_chat_length || 0;
         CONSECUTIVE_DEVIATION_COUNT = chat_metadata[MODULE_NAME].consecutive_deviation_count || 0;  // V33
+        LEARNED_CHARS_PER_TOKEN = chat_metadata[MODULE_NAME].learned_chars_per_token || 4.0;  // REQ-008
 
         // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
         // initialize it to current chat length to prevent constant recalculation
@@ -664,6 +875,7 @@ function save_truncation_index() {
     chat_metadata[MODULE_NAME].qdrant_token_history = QDRANT_TOKEN_HISTORY;
     chat_metadata[MODULE_NAME].last_stable_chat_length = LAST_STABLE_CHAT_LENGTH;
     chat_metadata[MODULE_NAME].consecutive_deviation_count = CONSECUTIVE_DEVIATION_COUNT;  // V33
+    chat_metadata[MODULE_NAME].learned_chars_per_token = LEARNED_CHARS_PER_TOKEN;  // REQ-008
 
     debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
     saveMetadataDebounced();
@@ -1546,9 +1758,10 @@ function update_status_display() {
         return;
     }
     
+    // REQ-008: Get initial count synchronously (TIER 2-4)
     let actualSize = count_tokens(last_raw_prompt);
     const targetSize = get_settings('target_context_size');
-    
+
     // Safety: If tokenizer returned 0, try segment-based calculation
     if (actualSize === 0 && last_raw_prompt && last_raw_prompt.length > 0) {
         const segmentResult = get_prompt_chat_segments_from_raw(last_raw_prompt);
@@ -1562,7 +1775,29 @@ function update_status_display() {
             debug(`[TOKENIZER] Used char estimate: ${actualSize} tokens`);
         }
     }
-    
+
+    // REQ-008: Then try API tokenizer asynchronously (TIER 1) for accurate count
+    // This updates LAST_ACTUAL_PROMPT_SIZE and refreshes UI when complete
+    if (last_raw_prompt && get_settings('api_tokenizer_enabled')) {
+        count_tokens_with_api(last_raw_prompt).then(apiCount => {
+            if (apiCount > 0 && LAST_TOKEN_TIER === 1) {
+                // API returned a result - update the actual size
+                LAST_ACTUAL_PROMPT_SIZE = apiCount;
+
+                // Recalibrate with accurate count
+                if (get_settings('auto_calibrate_target')) {
+                    calibrate_target_size(apiCount);
+                }
+
+                // Refresh displays
+                update_overview_tab();
+                update_calibration_ui();
+            }
+        }).catch(e => {
+            debug_trunc(`[API-TOK] Async update failed: ${e.message}`);
+        });
+    }
+
     const difference = actualSize - targetSize;
     const percentError = targetSize > 0 ? Math.abs((difference / targetSize) * 100) : 0;
     
@@ -2614,7 +2849,34 @@ function update_prediction_display() {
     } else {
         $('#ct_ov_next_trim').text('--').removeClass('ct_text_orange');
     }
-    
+
+    // REQ-008: Token accuracy display with tier indicator
+    const $accuracy = $('#ct_ov_token_accuracy');
+    if ($accuracy.length) {
+        const tierNames = { 1: 'API', 2: 'Local', 3: 'Learned', 4: 'Fallback' };
+        const tierName = tierNames[LAST_TOKEN_TIER] || '--';
+
+        // Remove all state classes first
+        $accuracy.removeClass('ct_text_green ct_text_yellow ct_text_orange ct_text_dim');
+
+        if (LAST_TOKEN_TIER === 1) {
+            // TIER 1: API is ground truth - show green with tier name
+            $accuracy.text(tierName).addClass('ct_text_green');
+        } else if (LAST_TOKEN_TIER === 2) {
+            // TIER 2: SillyTavern tokenizer - usually accurate
+            $accuracy.text(tierName).addClass('ct_text_green');
+        } else if (LAST_TOKEN_TIER === 3) {
+            // TIER 3: Learned ratio - show yellow (estimated)
+            $accuracy.text(`${tierName} (~${Math.round((4.0 / LEARNED_CHARS_PER_TOKEN) * 100)}%)`).addClass('ct_text_yellow');
+        } else if (LAST_TOKEN_TIER === 4) {
+            // TIER 4: Hardcoded fallback - show orange (least accurate)
+            $accuracy.text(`${tierName} (~85%)`).addClass('ct_text_orange');
+        } else {
+            // No data yet
+            $accuracy.text('--').addClass('ct_text_dim');
+        }
+    }
+
     // Room Left (matches HTML ID: ct_ov_room_left)
     if (trimEstimate.roomLeft !== null) {
         $('#ct_ov_room_left').text(`${trimEstimate.roomLeft.toLocaleString()} tokens`);
@@ -4095,7 +4357,17 @@ function initialize_ui_listeners() {
 
     // Per-module debug settings
     bind_setting('#ct_debug_truncation', 'debug_truncation', 'boolean');
-    
+
+    // REQ-008: API tokenizer toggle
+    $('#ct_api_tokenizer_enabled').prop('checked', get_settings('api_tokenizer_enabled')).on('change', function() {
+        update_settings('api_tokenizer_enabled', $(this).is(':checked'));
+        if (!$(this).is(':checked')) {
+            // Clear detection cache when disabled
+            DETECTED_BACKEND_TYPE = null;
+            API_TOKENIZER_DISABLED_UNTIL = 0;
+        }
+    });
+
     // Batch size (now a slider) - reset truncation when changed
     bind_range_setting('#ct_batch_size', 'batch_size', '#ct_batch_size_display');
     $('#ct_batch_size').off('change').on('change', function() {

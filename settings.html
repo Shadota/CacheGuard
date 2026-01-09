@@ -144,6 +144,10 @@
                                 </span>
                                 <span id="ct_ov_next_trim" class="ct_stat_value">--</span>
                             </div>
+                            <div class="ct_stat_row">
+                                <span class="ct_stat_label">Token Accuracy:</span>
+                                <span id="ct_ov_token_accuracy" class="ct_stat_value ct_text_dim">--</span>
+                            </div>
                         </div>
                     </div>
 
@@ -604,6 +608,15 @@
                         <div class="ct_slider_wrapper">
                             <input id="ct_summarization_delay" type="range" min="0" max="50" step="1" value="10" />
                         </div>
+                    </div>
+
+                    <div class="ct_compact_checkbox">
+                        <input id="ct_api_tokenizer_enabled" type="checkbox" />
+                        <label for="ct_api_tokenizer_enabled">Use API Tokenizer</label>
+                        <span class="ct_tooltip ct_tooltip_right">
+                            <i class="fa-solid fa-circle-info ct_info_icon"></i>
+                            <span class="ct_tooltip_text">Query the API backend for accurate token counts on large prompts. Supports TabbyAPI and KoboldCPP.</span>
+                        </span>
                     </div>
 
                     <div class="ct_compact_checkbox">
