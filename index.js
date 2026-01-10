@@ -604,6 +604,10 @@ async function test_tokenizer_connection() {
         if (tokenCount > 0) {
             $status.removeClass().addClass('ct_status_message ct_status_success')
                    .text(`Connected! Tokenized test text: ${tokenCount} tokens`);
+            // Update Token Source indicator to reflect successful API connection
+            LAST_TOKEN_TIER = 1;
+            LAST_TOKEN_ACCURACY = 100;
+            update_overview_tab();
             // Auto-clear after 10 seconds
             setTimeout(() => {
                 $status.text('').removeClass('ct_status_success ct_status_error ct_status_info');
