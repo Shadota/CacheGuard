@@ -189,6 +189,7 @@ let LAST_LOGGED_TIER = 0;                // Track last logged tier to reduce spa
 let API_TOKEN_DISTILLATION_RATIO = 1.0;  // Ratio of API tokens to SillyTavern tokens
 let API_TOKENIZER_AVAILABLE = false;      // Whether API tokenizer is reachable
 let RATIO_ACTIVE = false;                 // Whether ratio is currently applied
+let BREAKDOWN_SCALE_FACTOR = 1.0;         // Multiplier to align breakdown display with API count
 
 const TRAINING_GENERATIONS = 2;  // Generations needed to train correction factor (reduced from 3)
 const STABLE_THRESHOLD = 5;      // Consecutive stable gens to reach STABLE state
@@ -1031,6 +1032,12 @@ function load_truncation_index() {
             debug(`Loaded distillation ratio: ${API_TOKEN_DISTILLATION_RATIO.toFixed(3)}`);
         }
 
+        // Load breakdown scale factor
+        BREAKDOWN_SCALE_FACTOR = chat_metadata[MODULE_NAME].breakdown_scale_factor || 1.0;
+        if (BREAKDOWN_SCALE_FACTOR !== 1.0) {
+            debug(`Loaded breakdown scale factor: ${BREAKDOWN_SCALE_FACTOR.toFixed(3)}`);
+        }
+
         // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
         // initialize it to current chat length to prevent constant recalculation
         if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH === 0) {
@@ -1081,8 +1088,9 @@ function save_truncation_index() {
 
     // REQ-004: Save distillation ratio
     chat_metadata[MODULE_NAME].distillation_ratio = API_TOKEN_DISTILLATION_RATIO;
+    chat_metadata[MODULE_NAME].breakdown_scale_factor = BREAKDOWN_SCALE_FACTOR;
 
-    debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
+    debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, breakdown scale: ${BREAKDOWN_SCALE_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
     saveMetadataDebounced();
 }
 
@@ -1264,18 +1272,6 @@ function calculate_truncation_index() {
     const batchSize = get_settings('batch_size');
     const minKeep = get_settings('min_messages_to_keep');
     const maxContext = getMaxContextSize();
-
-    // In WAITING/INITIAL_TRAINING: use conservative 60% cap to prevent first-gen OOM
-    // There may be tokens we can't account for (other extensions, SillyTavern overhead)
-    const conservativeStates = ['WAITING', 'INITIAL_TRAINING'];
-    if (conservativeStates.includes(CALIBRATION_STATE)) {
-        const conservativeTarget = Math.floor(maxContext * 0.60);
-        if (targetSize > conservativeTarget) {
-            const originalPct = ((targetSize / maxContext) * 100).toFixed(0);
-            debug_trunc(`[TRUNCATION] CONSERVATIVE: Capping target from ${targetSize} (${originalPct}%) to ${conservativeTarget} (60%) (state: ${CALIBRATION_STATE})`);
-            targetSize = conservativeTarget;
-        }
-    }
 
     // V33: Defensive cap - never exceed 90% of max context regardless of settings
     const maxSafeContext = Math.floor(maxContext * 0.90);
@@ -1988,21 +1984,18 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
         RATIO_ACTIVE = false;
     }
 
-    // REQ-001, REQ-002: Choose context size based on calibration state
-    // - WAITING/INITIAL_TRAINING: Use max available (conservative, triggers truncation)
-    // - CALIBRATING/RETRAINING/STABLE: Use actual prompt (accurate, efficient)
+    // REQ-007 FIX: Always use actual prompt size for truncation calculations
+    // Previously, WAITING/INITIAL_TRAINING used maxAvailableContext which caused
+    // premature truncation on new chats far below target
+    // The "conservative" flag should only affect factor learning, NOT truncation input
     const conservativeStates = ['WAITING', 'INITIAL_TRAINING'];
     const useConservative = conservativeStates.includes(CALIBRATION_STATE);
 
+    CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize;
+
     if (useConservative) {
-        // Conservative: Use max available context to ensure truncation triggers for large chats
-        // actualPromptSize is still used for ratio calculation and display
-        CURRENT_CONTEXT_SIZE = maxAvailableContext;
-        debug_trunc(`[DISTILL] Using CONSERVATIVE context: ${CURRENT_CONTEXT_SIZE} (state: ${CALIBRATION_STATE})`);
-        debug_trunc(`[DISTILL] Actual for reference: ${actualPromptSize} (distilled: ${RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize})`);
+        debug_trunc(`[DISTILL] Using ACTUAL prompt for truncation: ${CURRENT_CONTEXT_SIZE} (state: ${CALIBRATION_STATE}, was conservative)`);
     } else {
-        // Accurate: Use actual prompt size (distilled if available)
-        CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize;
         debug_trunc(`[DISTILL] Using ACTUAL prompt: ${CURRENT_CONTEXT_SIZE} (state: ${CALIBRATION_STATE})`);
     }
 
@@ -2116,6 +2109,19 @@ function update_status_display() {
             if (apiCount > 0 && LAST_TOKEN_TIER === 1) {
                 // API returned a result - update the actual size
                 LAST_ACTUAL_PROMPT_SIZE = apiCount;
+
+                // REQ-002: Calculate breakdown scale factor
+                const stTotal = count_tokens(last_raw_prompt);
+                if (stTotal > 0) {
+                    const newScaleFactor = apiCount / stTotal;
+                    const oldFactor = BREAKDOWN_SCALE_FACTOR;
+                    // Smooth with 0.4/0.6 weighting (same pattern as CHAT_TOKEN_CORRECTION_FACTOR)
+                    BREAKDOWN_SCALE_FACTOR = (0.4 * newScaleFactor) + (0.6 * oldFactor);
+                    // Clamp to [0.5, 1.5] bounds
+                    BREAKDOWN_SCALE_FACTOR = Math.max(0.5, Math.min(1.5, BREAKDOWN_SCALE_FACTOR));
+                    debug_trunc(`[BREAKDOWN] Scale factor: ${oldFactor.toFixed(3)} -> ${BREAKDOWN_SCALE_FACTOR.toFixed(3)} (API: ${apiCount}, ST: ${stTotal})`);
+                    save_truncation_index();
+                }
 
                 // Recalibrate with accurate count
                 if (get_settings('auto_calibrate_target')) {
@@ -2283,6 +2289,7 @@ function reset_calibration() {
     STABLE_COUNT = 0;
     RETRAIN_COUNT = 0;
     CHAT_TOKEN_CORRECTION_FACTOR = 1.0;
+    BREAKDOWN_SCALE_FACTOR = 1.0;
     LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
     CONSECUTIVE_DEVIATION_COUNT = 0;  // V33
 
@@ -2860,19 +2867,22 @@ function update_overview_tab() {
             debug_trunc(`  Total: ${actualSize} tokens | Category Sum: ${categorySum} tokens`);
         }
         
-        // Use corrected values for breakdown so it matches the gauge
-        const correctedChatTokens = Math.floor(chatTokens * CHAT_TOKEN_CORRECTION_FACTOR);
-        const correctedSystemTokens = Math.floor(systemTokens * CHAT_TOKEN_CORRECTION_FACTOR);
-        // NOTE: Summary and Qdrant tokens are already counted separately and don't need correction
-        const correctedActualSize = Math.floor(actualSize * CHAT_TOKEN_CORRECTION_FACTOR);
-        const freeTokens = Math.max(0, maxContext - correctedActualSize);
+        // REQ-004: Apply BREAKDOWN_SCALE_FACTOR uniformly to ALL categories
+        const scaledChatTokens = Math.floor(chatTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledSystemTokens = Math.floor(systemTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledWorldRulesTokens = Math.floor(worldRulesTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledLorevaultTokens = Math.floor(lorevaultTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledSummaryTokens = Math.floor(summaryTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledQdrantTokens = Math.floor(qdrantTokens * BREAKDOWN_SCALE_FACTOR);
+        const scaledActualSize = Math.floor(actualSize * BREAKDOWN_SCALE_FACTOR);
+        const freeTokens = Math.max(0, maxContext - scaledActualSize);
 
-        const chatPct = (correctedChatTokens / maxContext * 100);
-        const systemPct = (correctedSystemTokens / maxContext * 100);
-        const worldRulesPct = (worldRulesTokens / maxContext * 100);
-        const lorevaultPct = (lorevaultTokens / maxContext * 100);
-        const summaryPct = (summaryTokens / maxContext * 100);
-        const qdrantPct = (qdrantTokens / maxContext * 100);
+        const chatPct = (scaledChatTokens / maxContext * 100);
+        const systemPct = (scaledSystemTokens / maxContext * 100);
+        const worldRulesPct = (scaledWorldRulesTokens / maxContext * 100);
+        const lorevaultPct = (scaledLorevaultTokens / maxContext * 100);
+        const summaryPct = (scaledSummaryTokens / maxContext * 100);
+        const qdrantPct = (scaledQdrantTokens / maxContext * 100);
         const freePct = (freeTokens / maxContext * 100);
         
         $('#ct_breakdown_chat').css('width', `${chatPct}%`);
@@ -2883,16 +2893,15 @@ function update_overview_tab() {
         $('#ct_breakdown_qdrant').css('width', `${qdrantPct}%`);
         $('#ct_breakdown_free').css('width', `${freePct}%`);
         
-        // Update token counts in foldable section with corrected values
-        // Use explicit systemTokens instead of correctedSystemTokens (which is based on subtraction)
-        $('#ct_breakdown_chat_tokens').text(`${correctedChatTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_system_tokens').text(`${systemTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_worldrules_tokens').text(`${worldRulesTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_lorevault_tokens').text(`${lorevaultTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_summaries_tokens').text(`${summaryTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_qdrant_tokens').text(`${qdrantTokens.toLocaleString()} tokens`);
+        // REQ-005: Update token counts with uniformly SCALED values
+        $('#ct_breakdown_chat_tokens').text(`${scaledChatTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_system_tokens').text(`${scaledSystemTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_worldrules_tokens').text(`${scaledWorldRulesTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_lorevault_tokens').text(`${scaledLorevaultTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_summaries_tokens').text(`${scaledSummaryTokens.toLocaleString()} tokens`);
+        $('#ct_breakdown_qdrant_tokens').text(`${scaledQdrantTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_free_tokens').text(`${freeTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_total_tokens').html(`<strong>${correctedActualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens (est)</strong>`);
+        $('#ct_breakdown_total_tokens').html(`<strong>${scaledActualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
         
         // Update Truncation Stats Card (now simplified)
         const targetSize = get_settings('target_context_size');
@@ -4792,6 +4801,7 @@ function initialize_ui_listeners() {
     // Force Recalibrate button - resets ONLY the correction factor (not truncation index)
     $('#ct_force_recalibrate').on('click', () => {
         CHAT_TOKEN_CORRECTION_FACTOR = 1.0;
+        BREAKDOWN_SCALE_FACTOR = 1.0;
         CALIBRATION_STATE = 'INITIAL_TRAINING';
         GENERATION_COUNT = 0;
         STABLE_COUNT = 0;
