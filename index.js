@@ -1283,7 +1283,6 @@ function calculate_truncation_index() {
     
     // Use current context size from intercept
     const currentPromptSize = CURRENT_CONTEXT_SIZE;
-    const maxContext = getMaxContextSize();
     debug_trunc(`[TRUNCATION] Prompt size: ${currentPromptSize}, Target: ${targetSize}, Max: ${maxContext}`);
 
     if (currentPromptSize === 0) {
