@@ -1265,6 +1265,18 @@ function calculate_truncation_index() {
     const minKeep = get_settings('min_messages_to_keep');
     const maxContext = getMaxContextSize();
 
+    // In WAITING/INITIAL_TRAINING: use conservative 60% cap to prevent first-gen OOM
+    // There may be tokens we can't account for (other extensions, SillyTavern overhead)
+    const conservativeStates = ['WAITING', 'INITIAL_TRAINING'];
+    if (conservativeStates.includes(CALIBRATION_STATE)) {
+        const conservativeTarget = Math.floor(maxContext * 0.60);
+        if (targetSize > conservativeTarget) {
+            const originalPct = ((targetSize / maxContext) * 100).toFixed(0);
+            debug_trunc(`[TRUNCATION] CONSERVATIVE: Capping target from ${targetSize} (${originalPct}%) to ${conservativeTarget} (60%) (state: ${CALIBRATION_STATE})`);
+            targetSize = conservativeTarget;
+        }
+    }
+
     // V33: Defensive cap - never exceed 90% of max context regardless of settings
     const maxSafeContext = Math.floor(maxContext * 0.90);
     if (targetSize > maxSafeContext) {
