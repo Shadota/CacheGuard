@@ -1280,7 +1280,15 @@ function calculate_truncation_index() {
             targetSize = targetSize - qdrantTokens;
         }
     }
-    
+
+    // Account for summary injection tokens - summaries are added AFTER truncation
+    // so we must reserve space for them in the truncation budget
+    const summaryBudget = get_max_summary_injection_tokens();
+    if (summaryBudget > 0) {
+        debug_trunc(`[TRUNCATION] Reserving ${summaryBudget} tokens for summary injection`);
+        targetSize = targetSize - summaryBudget;
+    }
+
     // Use current context size from intercept
     const currentPromptSize = CURRENT_CONTEXT_SIZE;
     debug_trunc(`[TRUNCATION] Prompt size: ${currentPromptSize}, Target: ${targetSize}, Max: ${maxContext}`);
