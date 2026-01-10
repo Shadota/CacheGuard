@@ -1946,9 +1946,23 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
         RATIO_ACTIVE = false;
     }
 
-    // Apply distillation to ACTUAL prompt size (not max context)
-    CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize;
-    debug_trunc(`[DISTILL] Prompt: actual=${actualPromptSize}, distilled=${CURRENT_CONTEXT_SIZE}, maxContext=${maxAvailableContext}`);
+    // REQ-001, REQ-002: Choose context size based on calibration state
+    // - WAITING/INITIAL_TRAINING: Use max available (conservative, triggers truncation)
+    // - CALIBRATING/RETRAINING/STABLE: Use actual prompt (accurate, efficient)
+    const conservativeStates = ['WAITING', 'INITIAL_TRAINING'];
+    const useConservative = conservativeStates.includes(CALIBRATION_STATE);
+
+    if (useConservative) {
+        // Conservative: Use max available context to ensure truncation triggers for large chats
+        // actualPromptSize is still used for ratio calculation and display
+        CURRENT_CONTEXT_SIZE = maxAvailableContext;
+        debug_trunc(`[DISTILL] Using CONSERVATIVE context: ${CURRENT_CONTEXT_SIZE} (state: ${CALIBRATION_STATE})`);
+        debug_trunc(`[DISTILL] Actual for reference: ${actualPromptSize} (distilled: ${RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize})`);
+    } else {
+        // Accurate: Use actual prompt size (distilled if available)
+        CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize;
+        debug_trunc(`[DISTILL] Using ACTUAL prompt: ${CURRENT_CONTEXT_SIZE} (state: ${CALIBRATION_STATE})`);
+    }
 
     // Refresh Qdrant memories first (async) - if enabled
     if (get_settings('qdrant_enabled')) {
