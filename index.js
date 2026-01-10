@@ -1038,6 +1038,9 @@ function load_truncation_index() {
             debug(`Loaded breakdown scale factor: ${BREAKDOWN_SCALE_FACTOR.toFixed(3)}`);
         }
 
+        // Load last API token count
+        LAST_API_TOKEN_COUNT = chat_metadata[MODULE_NAME].last_api_token_count ?? null;
+
         // V33 FIX: If loaded state is STABLE but LAST_STABLE_CHAT_LENGTH is 0 (legacy chat),
         // initialize it to current chat length to prevent constant recalculation
         if (CALIBRATION_STATE === 'STABLE' && LAST_STABLE_CHAT_LENGTH === 0) {
@@ -1089,6 +1092,7 @@ function save_truncation_index() {
     // REQ-004: Save distillation ratio
     chat_metadata[MODULE_NAME].distillation_ratio = API_TOKEN_DISTILLATION_RATIO;
     chat_metadata[MODULE_NAME].breakdown_scale_factor = BREAKDOWN_SCALE_FACTOR;
+    chat_metadata[MODULE_NAME].last_api_token_count = LAST_API_TOKEN_COUNT;
 
     debug(`Saved truncation index: ${TRUNCATION_INDEX}, correction factor: ${CHAT_TOKEN_CORRECTION_FACTOR.toFixed(3)}, breakdown scale: ${BREAKDOWN_SCALE_FACTOR.toFixed(3)}, state: ${CALIBRATION_STATE}`);
     saveMetadataDebounced();
@@ -1905,6 +1909,7 @@ function refresh_memory() {
 // Global variable to store context size from intercept
 let CURRENT_CONTEXT_SIZE = 0;
 let LAST_ACTUAL_PROMPT_SIZE = 0;
+let LAST_API_TOKEN_COUNT = null;  // Raw API token count, null if not available
 let LAST_PREDICTED_SIZE = 0;
 let LAST_PREDICTED_CHAT_SIZE = 0;
 let LAST_PREDICTED_CHAT_SIZE_RAW = 0;  // V29: Uncorrected value for factor calculation
@@ -2109,6 +2114,7 @@ function update_status_display() {
             if (apiCount > 0 && LAST_TOKEN_TIER === 1) {
                 // API returned a result - update the actual size
                 LAST_ACTUAL_PROMPT_SIZE = apiCount;
+                LAST_API_TOKEN_COUNT = apiCount;
 
                 // REQ-002: Calculate breakdown scale factor
                 const stTotal = count_tokens(last_raw_prompt);
@@ -2292,6 +2298,7 @@ function reset_calibration() {
     BREAKDOWN_SCALE_FACTOR = 1.0;
     LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
     CONSECUTIVE_DEVIATION_COUNT = 0;  // V33
+    LAST_API_TOKEN_COUNT = null;  // Clear until new generation provides API count
 
     debug('Calibration reset to WAITING');
     update_calibration_ui();
@@ -2901,7 +2908,11 @@ function update_overview_tab() {
         $('#ct_breakdown_summaries_tokens').text(`${scaledSummaryTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_qdrant_tokens').text(`${scaledQdrantTokens.toLocaleString()} tokens`);
         $('#ct_breakdown_free_tokens').text(`${freeTokens.toLocaleString()} tokens`);
-        $('#ct_breakdown_total_tokens').html(`<strong>${scaledActualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
+        if (LAST_API_TOKEN_COUNT > 0) {
+            $('#ct_breakdown_total_tokens').html(`<strong>${scaledActualSize.toLocaleString()} (API: ${LAST_API_TOKEN_COUNT.toLocaleString()}) / ${maxContext.toLocaleString()} tokens</strong>`);
+        } else {
+            $('#ct_breakdown_total_tokens').html(`<strong>${scaledActualSize.toLocaleString()} / ${maxContext.toLocaleString()} tokens</strong>`);
+        }
         
         // Update Truncation Stats Card (now simplified)
         const targetSize = get_settings('target_context_size');
@@ -4483,6 +4494,12 @@ async function auto_summarize_chat() {
         return;
     }
 
+    // REQ-001: Only auto-summarize when messages are actually excluded
+    if (!TRUNCATION_INDEX || TRUNCATION_INDEX <= 0) {
+        debug('Auto-summarization skipped: no messages excluded (TRUNCATION_INDEX=' + TRUNCATION_INDEX + ')');
+        return;
+    }
+
     // V33 FIX: Skip auto-summarization if context is significantly overflowing
     // Trim should happen first to make room, then summarization can proceed
     const targetSize = get_settings('target_context_size');
@@ -4504,7 +4521,8 @@ async function auto_summarize_chat() {
         if (i >= delay_threshold) {
             continue;
         }
-        if (get_data(chat[i], 'needs_summary')) {
+        // REQ-002: Only auto-summarize messages that are currently excluded
+        if (get_data(chat[i], 'needs_summary') && get_data(chat[i], 'lagging')) {
             to_summarize.push(i);
         }
     }
