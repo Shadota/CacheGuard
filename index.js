@@ -1283,7 +1283,9 @@ function calculate_truncation_index() {
     
     // Use current context size from intercept
     const currentPromptSize = CURRENT_CONTEXT_SIZE;
-    
+    const maxContext = getMaxContextSize();
+    debug_trunc(`[TRUNCATION] Prompt size: ${currentPromptSize}, Target: ${targetSize}, Max: ${maxContext}`);
+
     if (currentPromptSize === 0) {
         debug_trunc('No context size available, cannot calculate truncation');
         debug_trunc(`═══ TRUNCATION CALCULATION END (no data) ═══`);
@@ -1887,13 +1889,28 @@ let CHAT_TOKEN_CORRECTION_FACTOR = 1.0;  // Multiplier for chat token estimates
 globalThis.truncator_intercept_messages = async function (chat, contextSize, abort, type) {
     if (!get_settings('enabled') && !get_settings('qdrant_enabled')) return;
 
-    // Store raw context size
-    const rawContextSize = contextSize;
+    // contextSize is MAX available context (budget), not current prompt size
+    const maxAvailableContext = contextSize;
+
+    // Get actual prompt to measure real token count
+    const last_raw_prompt = get_last_prompt_raw();
+
+    // Calculate actual prompt size using ST tokenizer as baseline
+    let actualPromptSize = 0;
+    if (last_raw_prompt && last_raw_prompt.length > 0) {
+        actualPromptSize = count_tokens(last_raw_prompt);
+    }
+
+    // If we couldn't get actual size, fall back to estimation from contextSize
+    // This is a rough heuristic: assume prompt uses most of available context
+    if (actualPromptSize === 0) {
+        debug_trunc('[DISTILL] WARNING: Could not measure actual prompt size, using heuristic');
+        actualPromptSize = Math.floor(maxAvailableContext * 0.9);
+    }
 
     // REQ-006: Get API token count BEFORE truncation for accurate ratio
     if (API_TOKENIZER_AVAILABLE && get_settings('api_tokenizer_enabled')) {
         try {
-            const last_raw_prompt = get_last_prompt_raw();
             if (last_raw_prompt && last_raw_prompt.length > 0) {
                 // Use timeout of 500ms for intercept (REQ-007)
                 const controller = new AbortController();
@@ -1903,13 +1920,10 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
                     const apiTokens = await count_tokens_via_api(last_raw_prompt);
                     clearTimeout(timeoutId);
 
-                    if (apiTokens && apiTokens > 0) {
-                        const stTokens = count_tokens(last_raw_prompt);
-                        if (stTokens > 0) {
-                            API_TOKEN_DISTILLATION_RATIO = calculate_distillation_ratio(apiTokens, stTokens);
-                            RATIO_ACTIVE = true;
-                            debug_trunc(`[DISTILL] Ratio active: ${API_TOKEN_DISTILLATION_RATIO.toFixed(3)}`);
-                        }
+                    if (apiTokens && apiTokens > 0 && actualPromptSize > 0) {
+                        API_TOKEN_DISTILLATION_RATIO = calculate_distillation_ratio(apiTokens, actualPromptSize);
+                        RATIO_ACTIVE = true;
+                        debug_trunc(`[DISTILL] Ratio active: ${API_TOKEN_DISTILLATION_RATIO.toFixed(3)}`);
                     }
                 } catch (e) {
                     clearTimeout(timeoutId);
@@ -1918,7 +1932,6 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
                     } else {
                         debug_trunc(`[DISTILL] API call failed: ${e.message}`);
                     }
-                    // REQ-016: Fallback to no distillation
                     RATIO_ACTIVE = false;
                 }
             }
@@ -1934,9 +1947,9 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
         RATIO_ACTIVE = false;
     }
 
-    // REQ-013: Apply distillation ratio to context size
-    CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(rawContextSize) : rawContextSize;
-    debug_trunc(`[DISTILL] Context: raw=${rawContextSize}, distilled=${CURRENT_CONTEXT_SIZE}`);
+    // Apply distillation to ACTUAL prompt size (not max context)
+    CURRENT_CONTEXT_SIZE = RATIO_ACTIVE ? distill_tokens(actualPromptSize) : actualPromptSize;
+    debug_trunc(`[DISTILL] Prompt: actual=${actualPromptSize}, distilled=${CURRENT_CONTEXT_SIZE}, maxContext=${maxAvailableContext}`);
 
     // Refresh Qdrant memories first (async) - if enabled
     if (get_settings('qdrant_enabled')) {
@@ -4460,19 +4473,25 @@ function register_event_listeners() {
             // - deletion_count, qdrant_token_history
             load_truncation_index();
 
-            // REQ-009: Check API tokenizer availability on chat load
-            check_api_tokenizer_availability().then(available => {
-                if (available) {
-                    debug_trunc('[DISTILL] API available, ratio will be calculated on first generation');
-                }
-            });
-
             // Clear Qdrant memories for new chat (these are transient, not persisted)
             CURRENT_QDRANT_MEMORIES = [];
             CURRENT_QDRANT_INJECTION = '';
             // NOTE: QDRANT_TOKEN_HISTORY is now loaded from chat_metadata
             // by load_truncation_index() - no manual reset needed
         }
+
+        // REQ-009: Check API tokenizer availability on EVERY chat load (not just switching)
+        // This ensures first load after page refresh also checks API
+        check_api_tokenizer_availability().then(available => {
+            if (available) {
+                debug_trunc('[DISTILL] API tokenizer available');
+            } else {
+                debug_trunc('[DISTILL] API tokenizer not available');
+            }
+        }).catch(e => {
+            debug_trunc(`[DISTILL] API check error: ${e.message}`);
+        });
+
         currentChatId = newChatId;
         
         // Initialize chat snapshot for deletion/edit detection
