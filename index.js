@@ -1301,10 +1301,8 @@ function calculate_truncation_index() {
     // Count messages that have summaries stored (check memory field directly)
     // Don't use collect_summary_indexes() here - it depends on lagging flag
     // which may not be set correctly during initial calculation
-    const ctx = getContext();
-    const chatForSummaryCheck = ctx.chat || [];
     let summaryCount = 0;
-    for (const msg of chatForSummaryCheck) {
+    for (const msg of chat) {
         if (get_memory(msg)) summaryCount++;
     }
 
