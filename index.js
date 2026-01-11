@@ -1293,12 +1293,26 @@ function calculate_truncation_index() {
         }
     }
 
-    // Account for summary injection tokens - summaries are added AFTER truncation
-    // so we must reserve space for them in the truncation budget
+    // V36 FIX: Only reserve summary budget when summaries actually exist
+    // Previously reserved space speculatively, causing unnecessary truncation
+    // when no summaries had been generated yet (e.g., fresh chat load)
     const summaryBudget = get_max_summary_injection_tokens();
-    if (summaryBudget > 0) {
-        debug_trunc(`[TRUNCATION] Reserving ${summaryBudget} tokens for summary injection`);
+
+    // Count messages that have summaries stored (check memory field directly)
+    // Don't use collect_summary_indexes() here - it depends on lagging flag
+    // which may not be set correctly during initial calculation
+    const ctx = getContext();
+    const chatForSummaryCheck = ctx.chat || [];
+    let summaryCount = 0;
+    for (const msg of chatForSummaryCheck) {
+        if (get_memory(msg)) summaryCount++;
+    }
+
+    if (summaryBudget > 0 && summaryCount > 0) {
+        debug_trunc(`[TRUNCATION] Reserving ${summaryBudget} tokens for ${summaryCount} existing summaries`);
         targetSize = targetSize - summaryBudget;
+    } else if (summaryBudget > 0) {
+        debug_trunc(`[TRUNCATION] No summaries exist, skipping ${summaryBudget} token reservation`);
     }
 
     // Use current context size from intercept
