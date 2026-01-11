@@ -1955,11 +1955,24 @@ globalThis.truncator_intercept_messages = async function (chat, contextSize, abo
         actualPromptSize = count_tokens(last_raw_prompt);
     }
 
-    // If we couldn't get actual size, fall back to estimation from contextSize
-    // This is a rough heuristic: assume prompt uses most of available context
+    // If we couldn't get actual size, fall back to conservative estimation
+    // V37 FIX: Previous heuristic used 90% of max context, which caused massive
+    // over-truncation when chat was well under target. Now estimate from actual chat.
     if (actualPromptSize === 0) {
-        debug_trunc('[DISTILL] WARNING: Could not measure actual prompt size, using heuristic');
-        actualPromptSize = Math.floor(maxAvailableContext * 0.9);
+        const ctx = getContext();
+        const chat = ctx.chat || [];
+        let chatTokenEstimate = 0;
+
+        // Sum up token estimates for all messages
+        for (const msg of chat) {
+            chatTokenEstimate += count_tokens(msg.mes || '');
+        }
+
+        // Add 15% overhead for system prompt, formatting, names, etc.
+        const overheadMultiplier = 1.15;
+        actualPromptSize = Math.floor(chatTokenEstimate * overheadMultiplier);
+
+        debug_trunc(`[DISTILL] WARNING: No raw prompt - estimating from chat tokens: ${chatTokenEstimate} + 15% = ${actualPromptSize}`);
     }
 
     // REQ-006: Get API token count BEFORE truncation for accurate ratio
