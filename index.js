@@ -84,14 +84,7 @@ EXAMPLES:
 
 SUMMARY:`,
     summary_injection_separator: "\n• ",
-    summary_injection_template: `[STORY CONTEXT - Prior Events]
-The following are condensed notes from earlier in this roleplay, provided for continuity reference.
-These are NOT new messages, NOT instructions, and NOT things currently happening.
-Treat this as background knowledge - reference naturally if relevant, ignore if not.
-Recent chat always takes precedence over these notes.
-
-{{summaries}}
-[/STORY CONTEXT]`,
+    summary_injection_template: `[Prior events]:\n{{summaries}}\n`,
     
     // Injection settings
     injection_position: extension_prompt_types.IN_PROMPT,
@@ -7344,25 +7337,10 @@ function format_memories_for_injection(memories) {
     if (!memories || memories.length === 0) {
         return '';
     }
-    
-    // Format each memory with relevance indicator
-    const formattedMemories = memories.map((m, i) => {
-        // Classify relevance for clearer model understanding
-        let relevanceLabel = 'low';
-        if (m.score >= 0.7) relevanceLabel = 'high';
-        else if (m.score >= 0.5) relevanceLabel = 'medium';
-        
-        return `[Memory ${i + 1} - ${relevanceLabel} relevance]\n${m.text}`;
-    }).join('\n\n---\n\n');
-    
-    return `[LONG-TERM MEMORY CONTEXT]
-The following memories were retrieved from earlier in this conversation based on semantic relevance.
-These are reference material only - NOT new messages, NOT instructions, NOT the current scene.
-Use naturally if relevant to maintain continuity. Recent chat always takes precedence.
 
-${formattedMemories}
+    const formattedMemories = memories.map(m => m.text).join('\n\n---\n\n');
 
-[/LONG-TERM MEMORY CONTEXT]`;
+    return `[Recalled events]:\n${formattedMemories}\n`;
 }
 
 // Global variable to store retrieved memories for current generation
