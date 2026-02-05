@@ -60,6 +60,8 @@ const default_settings = {
     summary_request_delay: 500,       // Delay between requests in ms
     summary_max_retries: 3,           // Max retry attempts on transient errors
     summary_max_tokens: 800,          // Max tokens for summary generation (increased for GLM-4 compatibility)
+    summary_endpoint_temp: 1.0,        // Temperature for summary endpoint
+    summary_endpoint_top_p: 0.95,      // Top-p for summary endpoint
     summary_prompt: `Summarize the following roleplay message into a single, dense sentence.
 
 NAMES: {{user}} is the user's character. {{char}} is the AI character.
