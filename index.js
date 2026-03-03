@@ -2334,20 +2334,22 @@ function calibrate_target_size(actualSize) {
     const idealTarget = Math.floor(maxContext * targetUtilization);
     
     // Calculate the threshold for when to start calibrating
-    // ALWAYS use target_context_size as threshold
-    // The ideal (maxContext * targetUtilization) is what we calibrate TOWARD, not what we wait FOR
-    const startThreshold = get_settings('target_context_size');
-    
+    // Cap to safe limit (90% of maxContext) so threshold is always reachable
+    // Without this cap, target_context_size can exceed maxContext making training impossible
+    const maxSafeContext = Math.floor(maxContext * 0.90);
+    const startThreshold = Math.min(get_settings('target_context_size'), maxSafeContext);
+
     // Update Qdrant token history for averaging (Fix 3.2)
     update_qdrant_token_history();
-    
+
     // Fix 3.1: Use dynamic tolerance that accounts for Qdrant variance
     const tolerance = get_dynamic_tolerance();
-    
+
     // V33 FIX: Calculate deviation against calibrated target, not utilization
     // Question: "Is actual prompt close to our target_context_size?"
     // NOT: "Is actualSize/maxContext close to targetUtilization?"
-    let calibratedTarget = get_settings('target_context_size');
+    // Cap to maxSafeContext so deviation is calculated against a reachable target
+    let calibratedTarget = Math.min(get_settings('target_context_size'), maxSafeContext);
     
     // V34 FIX: Do NOT subtract Qdrant tokens from calibration target.
     // The truncation system already handles Qdrant in calculate_truncation_index().
