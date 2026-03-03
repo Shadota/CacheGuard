@@ -2368,18 +2368,22 @@ function calibrate_target_size(actualSize) {
     
     switch (CALIBRATION_STATE) {
         case 'WAITING':
-            // V35 FIX: Truncation-active should only accelerate training when NEAR threshold
-            // Not when we're far below target (e.g., 40% utilization)
-            // The V34 BUG-001 FIX allowed training at any size when truncation was active,
-            // which caused premature training starts. Now require 90% of target first.
             const truncationActive = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 0;
             const nearThreshold = actualSize >= startThreshold * 0.9;  // Within 90% of target
+            // V36 FIX: When many messages are excluded, estimates are likely wrong and
+            // calibration is needed to fix them. Requiring 90% of target creates a catch-22:
+            // bad estimates prevent calibration, which is needed to fix the estimates.
+            // Significant truncation (>10 messages excluded) means we're actively managing
+            // context and should start calibrating immediately.
+            const significantTruncation = TRUNCATION_INDEX !== null && TRUNCATION_INDEX > 10;
 
             // Start training when:
             // 1. Reached the threshold (actualSize >= startThreshold), OR
-            // 2. Near threshold (>=90%) AND truncation is active (acceleration case)
+            // 2. Near threshold (>=90%) AND truncation is active (acceleration case), OR
+            // 3. Significant truncation active (>10 messages excluded) - calibration needed
             const shouldStartTraining = actualSize >= startThreshold ||
-                                        (truncationActive && nearThreshold);
+                                        (truncationActive && nearThreshold) ||
+                                        significantTruncation;
 
             if (shouldStartTraining) {
                 // Transition to INITIAL_TRAINING
