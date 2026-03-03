@@ -167,6 +167,7 @@ let LAST_CORRECTION_FACTOR = 1.0;  // Previous factor for convergence detection
 let RETRAIN_COUNT = 0;         // Generations in retraining phase
 let LAST_STABLE_CHAT_LENGTH = 0;  // Chat length when entering STABLE state
 let CONSECUTIVE_DEVIATION_COUNT = 0;  // V33: Track consecutive high-deviation generations in STABLE
+let STABLE_BASELINE_ACTUAL = 0;        // V36: Baseline actualSize when entering STABLE, for relative deviation
 
 // V33: Cache last valid raw prompt for fallback during intercept
 let CACHED_RAW_PROMPT = null;
@@ -2318,6 +2319,7 @@ function reset_calibration() {
     BREAKDOWN_SCALE_FACTOR = 1.0;
     LAST_STABLE_CHAT_LENGTH = 0;  // V33: Clear STABLE tracking
     CONSECUTIVE_DEVIATION_COUNT = 0;  // V33
+    STABLE_BASELINE_ACTUAL = 0;  // V36: Clear baseline
     LAST_API_TOKEN_COUNT = null;  // Clear until new generation provides API count
 
     debug('Calibration reset to WAITING');
@@ -2434,7 +2436,10 @@ function calibrate_target_size(actualSize) {
                     CALIBRATION_STATE = 'STABLE';
                     // V33: Track chat length for STABLE state locking
                     LAST_STABLE_CHAT_LENGTH = getContext().chat?.length || 0;
-                    debug_trunc(`Entering STABLE state with ${LAST_STABLE_CHAT_LENGTH} messages`);
+                    // V36: Record baseline actual so STABLE deviation is measured relative
+                    // to where we actually converged, not the theoretical target
+                    STABLE_BASELINE_ACTUAL = actualSize;
+                    debug_trunc(`Entering STABLE state with ${LAST_STABLE_CHAT_LENGTH} messages, baseline actual: ${STABLE_BASELINE_ACTUAL}`);
                     // REQ-005: Removed intrusive calibration complete toast
                     // toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
 
@@ -2470,11 +2475,19 @@ function calibrate_target_size(actualSize) {
             break;
             
         case 'STABLE':
-            // V33 FIX: Require consecutive high deviations before destabilizing
-            // This prevents single-generation flukes from triggering RETRAINING
-            if (deviation > tolerance * 1.5) {
+            // V36 FIX: Measure deviation relative to baseline actual, not theoretical target.
+            // The system converges to an actual size that may differ significantly from
+            // target_context_size (e.g., 38k actual vs 72k target) due to API vs ST tokenizer
+            // differences. Comparing against theoretical target causes perpetual destabilization.
+            // Instead: destabilize only if actual drifts far from where we were when entering STABLE.
+            const stableBaseline = STABLE_BASELINE_ACTUAL || actualSize;
+            const stableDeviation = stableBaseline > 0
+                ? Math.abs((actualSize - stableBaseline) / stableBaseline)
+                : deviation;
+
+            if (stableDeviation > tolerance * 1.5) {
                 CONSECUTIVE_DEVIATION_COUNT++;
-                debug_trunc(`STABLE: High deviation detected (${(deviation * 100).toFixed(1)}%), count: ${CONSECUTIVE_DEVIATION_COUNT}/2`);
+                debug_trunc(`STABLE: Deviation from baseline (${(stableDeviation * 100).toFixed(1)}%), count: ${CONSECUTIVE_DEVIATION_COUNT}/2 (baseline: ${stableBaseline}, actual: ${actualSize})`);
 
                 if (CONSECUTIVE_DEVIATION_COUNT >= 2) {
                     CALIBRATION_STATE = 'RETRAINING';
@@ -2482,12 +2495,13 @@ function calibrate_target_size(actualSize) {
                     STABLE_COUNT = 0;
                     LAST_STABLE_CHAT_LENGTH = 0;
                     CONSECUTIVE_DEVIATION_COUNT = 0;
+                    STABLE_BASELINE_ACTUAL = 0;
                     toastr.warning('Calibration destabilized - retraining...', MODULE_NAME_FANCY);
                 }
             } else {
                 // Reset deviation count when within tolerance
                 if (CONSECUTIVE_DEVIATION_COUNT > 0) {
-                    debug_trunc(`STABLE: Deviation recovered, resetting count`);
+                    debug_trunc(`STABLE: Deviation recovered (${(stableDeviation * 100).toFixed(1)}%), resetting count`);
                 }
                 CONSECUTIVE_DEVIATION_COUNT = 0;
             }
