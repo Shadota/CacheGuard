@@ -2150,9 +2150,9 @@ function update_status_display() {
                     save_truncation_index();
                 }
 
-                // Recalibrate with accurate count
+                // Recalibrate with accurate count (isApiSource=true)
                 if (get_settings('auto_calibrate_target')) {
-                    calibrate_target_size(apiCount);
+                    calibrate_target_size(apiCount, true);
                 }
 
                 // Refresh displays
@@ -2329,7 +2329,7 @@ function reset_calibration() {
 }
 
 // Auto-calibrate target context size based on actual usage
-function calibrate_target_size(actualSize) {
+function calibrate_target_size(actualSize, isApiSource = false) {
     const maxContext = getMaxContextSize();
     const targetUtilization = get_settings('target_utilization');
     const autoCalibrate = get_settings('auto_calibrate_target');
@@ -2436,10 +2436,10 @@ function calibrate_target_size(actualSize) {
                     CALIBRATION_STATE = 'STABLE';
                     // V33: Track chat length for STABLE state locking
                     LAST_STABLE_CHAT_LENGTH = getContext().chat?.length || 0;
-                    // V36: Record baseline actual so STABLE deviation is measured relative
-                    // to where we actually converged, not the theoretical target
-                    STABLE_BASELINE_ACTUAL = actualSize;
-                    debug_trunc(`Entering STABLE state with ${LAST_STABLE_CHAT_LENGTH} messages, baseline actual: ${STABLE_BASELINE_ACTUAL}`);
+                    // V36: Record baseline from API source only. If entering from ST call,
+                    // defer baseline until first API call arrives (STABLE case handles this).
+                    STABLE_BASELINE_ACTUAL = isApiSource ? actualSize : 0;
+                    debug_trunc(`Entering STABLE state with ${LAST_STABLE_CHAT_LENGTH} messages, baseline actual: ${STABLE_BASELINE_ACTUAL || '(deferred to API)'}`);
                     // REQ-005: Removed intrusive calibration complete toast
                     // toastr.success(`Calibration complete! Target: ${get_settings('target_context_size').toLocaleString()} tokens`, MODULE_NAME_FANCY);
 
@@ -2475,17 +2475,33 @@ function calibrate_target_size(actualSize) {
             break;
             
         case 'STABLE':
-            // V36 FIX: Measure deviation relative to baseline actual, not theoretical target.
-            // The system converges to an actual size that may differ significantly from
-            // target_context_size (e.g., 38k actual vs 72k target) due to API vs ST tokenizer
-            // differences. Comparing against theoretical target causes perpetual destabilization.
-            // Instead: destabilize only if actual drifts far from where we were when entering STABLE.
+            // V36 FIX: Only evaluate stability on API tokenizer calls.
+            // calibrate_target_size() is called TWICE per generation:
+            //   1. ST tokenizer (~36k) — different scale than API
+            //   2. API tokenizer (~30k) — ground truth
+            // Comparing ST tokens against an API baseline causes false 30%+ deviation.
+            // Skip ST calls entirely for stability checks.
+            if (!isApiSource) {
+                debug_trunc(`STABLE: Skipping ST tokenizer call for stability check (actual: ${actualSize})`);
+                break;
+            }
+
             const stableBaseline = STABLE_BASELINE_ACTUAL || actualSize;
             const stableDeviation = stableBaseline > 0
                 ? Math.abs((actualSize - stableBaseline) / stableBaseline)
                 : deviation;
 
-            if (stableDeviation > tolerance * 1.5) {
+            // Smooth-update baseline to absorb natural API variance (~5-10%)
+            // Without this, small fluctuations between API calls accumulate
+            if (STABLE_BASELINE_ACTUAL > 0) {
+                STABLE_BASELINE_ACTUAL = Math.round(0.8 * STABLE_BASELINE_ACTUAL + 0.2 * actualSize);
+            } else {
+                // First API call after entering STABLE — initialize baseline
+                STABLE_BASELINE_ACTUAL = actualSize;
+                debug_trunc(`STABLE: Baseline initialized from API: ${actualSize}`);
+            }
+
+            if (stableDeviation > tolerance * 2.5) {
                 CONSECUTIVE_DEVIATION_COUNT++;
                 debug_trunc(`STABLE: Deviation from baseline (${(stableDeviation * 100).toFixed(1)}%), count: ${CONSECUTIVE_DEVIATION_COUNT}/2 (baseline: ${stableBaseline}, actual: ${actualSize})`);
 
