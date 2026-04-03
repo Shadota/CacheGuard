@@ -880,13 +880,84 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
         }
     }
 
+    // If no Llama 3, try Mistral instruct format: [INST]...[/INST]
+    if (matches.length === 0) {
+        const userTurnRegex = /\[INST\]([\s\S]*?)\[\/INST\]/g;
+        let userMatch;
+        const userTurns = [];
+
+        while ((userMatch = userTurnRegex.exec(raw_prompt)) !== null) {
+            userTurns.push({
+                fullStart: userMatch.index,
+                fullEnd: userMatch.index + userMatch[0].length,
+            });
+        }
+
+        if (userTurns.length > 0) {
+            // Check for initial assistant content before the first [INST]
+            // In Mistral format, the character greeting appears between
+            // [/SYSTEM_PROMPT] and the first [INST] with no explicit role marker
+            const firstInstIndex = userTurns[0].fullStart;
+            let initialAssistantStart = 0;
+
+            // Find the last [/SYSTEM_PROMPT] before the first [INST]
+            const syspromptEndRegex = /\[\/SYSTEM_PROMPT\]/g;
+            let syspromptMatch;
+            while ((syspromptMatch = syspromptEndRegex.exec(raw_prompt)) !== null) {
+                const endPos = syspromptMatch.index + syspromptMatch[0].length;
+                if (endPos <= firstInstIndex) {
+                    initialAssistantStart = endPos;
+                } else {
+                    break;
+                }
+            }
+
+            const initialContent = raw_prompt.slice(initialAssistantStart, firstInstIndex);
+            if (initialContent.replace(/<\/?s>/g, '').trim().length > 0) {
+                matches.push({
+                    index: initialAssistantStart,
+                    endIndex: firstInstIndex,
+                    role: 'assistant',
+                    format: 'mistral'
+                });
+            }
+
+            for (let t = 0; t < userTurns.length; t++) {
+                const turn = userTurns[t];
+
+                // User segment: the full [INST]...[/INST] block
+                matches.push({
+                    index: turn.fullStart,
+                    endIndex: turn.fullEnd,
+                    role: 'user',
+                    format: 'mistral'
+                });
+
+                // Assistant segment: from [/INST] to next [INST] or end of prompt
+                const assistantStart = turn.fullEnd;
+                const assistantEnd = (t + 1 < userTurns.length) ? userTurns[t + 1].fullStart : raw_prompt.length;
+                const assistantContent = raw_prompt.slice(assistantStart, assistantEnd);
+
+                // Only add if there's meaningful content (strip </s> and <s> markers)
+                if (assistantContent.replace(/<\/?s>/g, '').trim().length > 0) {
+                    matches.push({
+                        index: assistantStart,
+                        endIndex: assistantEnd,
+                        role: 'assistant',
+                        format: 'mistral'
+                    });
+                }
+            }
+        }
+    }
+
     debug(`  get_prompt_chat_segments_from_raw: Found ${matches.length} header matches (format: ${matches[0]?.format || 'none'})`);
 
     // V33: Extract first header position for system token calculation
     const firstHeaderIndex = matches.length > 0 ? matches[0].index : -1;
 
     if (matches.length === 0) {
-        debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3 or ChatML format');
+        debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3, ChatML, or Mistral format');
         return { segments: null, firstHeaderIndex: -1, systemTokenCount: 0 };
     }
 
@@ -908,6 +979,9 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
             // ChatML ends with <|im_end|>
             const endMarker = raw_prompt.indexOf('<|im_end|>', current.index);
             end_index = endMarker !== -1 ? endMarker + 10 : (next ? next.index : raw_prompt.length);
+        } else if (current.format === 'mistral') {
+            // Mistral: endIndex was pre-computed during parsing
+            end_index = current.endIndex;
         } else {
             // Llama 3 ends at next header or end of prompt
             end_index = next ? next.index : raw_prompt.length;
@@ -1350,15 +1424,7 @@ function calculate_truncation_index() {
     
     // Calculate separator size for summaries
     const sepSize = calculate_injection_separator_size();
-    
-    // Prompt header tokens (for estimating message sizes in prompt)
-    const PROMPT_HEADER_USER = '<|eot_id|><|start_header_id|>user<|end_header_id|>';
-    const PROMPT_HEADER_ASSISTANT = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>';
-    const promptHeaderTokens = {
-        user: count_tokens(PROMPT_HEADER_USER),
-        assistant: count_tokens(PROMPT_HEADER_ASSISTANT),
-    };
-    
+
     // Build message token map from last prompt for accurate estimation
     let last_raw_prompt = get_last_prompt_raw();
 
@@ -1381,8 +1447,26 @@ function calculate_truncation_index() {
         }
     }
 
+    // Prompt header tokens (for estimating message sizes in prompt)
+    // Detect format from last raw prompt to use correct header sizes
+    let PROMPT_HEADER_USER, PROMPT_HEADER_ASSISTANT;
+    if (last_raw_prompt && last_raw_prompt.includes('<|im_start|>')) {
+        PROMPT_HEADER_USER = '<|im_start|>user\n';
+        PROMPT_HEADER_ASSISTANT = '<|im_start|>assistant\n';
+    } else if (last_raw_prompt && last_raw_prompt.includes('[INST]')) {
+        PROMPT_HEADER_USER = '[INST]';
+        PROMPT_HEADER_ASSISTANT = '[/INST]';
+    } else {
+        PROMPT_HEADER_USER = '<|eot_id|><|start_header_id|>user<|end_header_id|>';
+        PROMPT_HEADER_ASSISTANT = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>';
+    }
+    const promptHeaderTokens = {
+        user: count_tokens(PROMPT_HEADER_USER),
+        assistant: count_tokens(PROMPT_HEADER_ASSISTANT),
+    };
+
     let message_token_map = get_prompt_message_tokens_from_raw(last_raw_prompt, chat);
-    
+
     // Calculate non-chat budget from the current raw prompt
     // Both total and chat tokens must come from the SAME prompt for accuracy
     let totalPromptTokens;
@@ -2778,6 +2862,7 @@ function calculate_system_tokens(raw_prompt, firstHeaderIndex, worldRulesTokens,
         const chatStartMarkers = [
             /<\|im_start\|>(user|assistant)/,
             /<\|start_header_id\|>(user|assistant)/,
+            /\[INST\]/,
             /^(User|Assistant|{{user}}|{{char}}):/m
         ];
 
