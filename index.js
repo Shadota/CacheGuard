@@ -967,7 +967,9 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
     debug(`  get_prompt_chat_segments_from_raw: Found ${matches.length} header matches (format: ${matches[0]?.format || 'none'})`);
 
     // V33: Extract first header position for system token calculation
-    const firstHeaderIndex = matches.length > 0 ? matches[0].index : -1;
+    // Use the first user/assistant match so leading system turns are accounted as system tokens
+    const firstChatMatch = matches.find(m => m.role === 'user' || m.role === 'assistant');
+    const firstHeaderIndex = firstChatMatch ? firstChatMatch.index : (matches.length > 0 ? matches[0].index : -1);
 
     if (matches.length === 0) {
         debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3, ChatML, Gemma, or Mistral format');
