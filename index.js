@@ -880,7 +880,20 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
         }
     }
 
-    // If no Llama 3, try Mistral instruct format: [INST]...[/INST]
+    // If no Llama 3, try Gemma turn format: <|turn>role ... <turn|>
+    if (matches.length === 0) {
+        const gemma_regex = /<\|turn>(user|assistant|system|model)\n/g;
+        while ((match = gemma_regex.exec(raw_prompt)) !== null) {
+            const role = match[1] === 'model' ? 'assistant' : match[1];
+            matches.push({
+                index: match.index,
+                role: role,
+                format: 'gemma'
+            });
+        }
+    }
+
+    // If no Gemma, try Mistral instruct format: [INST]...[/INST]
     if (matches.length === 0) {
         const userTurnRegex = /\[INST\]([\s\S]*?)\[\/INST\]/g;
         let userMatch;
@@ -957,7 +970,7 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
     const firstHeaderIndex = matches.length > 0 ? matches[0].index : -1;
 
     if (matches.length === 0) {
-        debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3, ChatML, or Mistral format');
+        debug('  get_prompt_chat_segments_from_raw: No headers found, not Llama 3, ChatML, Gemma, or Mistral format');
         return { segments: null, firstHeaderIndex: -1, systemTokenCount: 0 };
     }
 
@@ -982,6 +995,10 @@ function get_prompt_chat_segments_from_raw(raw_prompt) {
         } else if (current.format === 'mistral') {
             // Mistral: endIndex was pre-computed during parsing
             end_index = current.endIndex;
+        } else if (current.format === 'gemma') {
+            // Gemma ends with <turn|>
+            const endMarker = raw_prompt.indexOf('<turn|>', current.index);
+            end_index = endMarker !== -1 ? endMarker + 7 : (next ? next.index : raw_prompt.length);
         } else {
             // Llama 3 ends at next header or end of prompt
             end_index = next ? next.index : raw_prompt.length;
@@ -1456,6 +1473,9 @@ function calculate_truncation_index() {
     } else if (last_raw_prompt && last_raw_prompt.includes('[INST]')) {
         PROMPT_HEADER_USER = '[INST]';
         PROMPT_HEADER_ASSISTANT = '[/INST]';
+    } else if (last_raw_prompt && last_raw_prompt.includes('<|turn>')) {
+        PROMPT_HEADER_USER = '<|turn>user\n';
+        PROMPT_HEADER_ASSISTANT = '<|turn>model\n';
     } else {
         PROMPT_HEADER_USER = '<|eot_id|><|start_header_id|>user<|end_header_id|>';
         PROMPT_HEADER_ASSISTANT = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>';
@@ -2863,6 +2883,7 @@ function calculate_system_tokens(raw_prompt, firstHeaderIndex, worldRulesTokens,
             /<\|im_start\|>(user|assistant)/,
             /<\|start_header_id\|>(user|assistant)/,
             /\[INST\]/,
+            /<\|turn>(user|assistant|model)/,
             /^(User|Assistant|{{user}}|{{char}}):/m
         ];
 
