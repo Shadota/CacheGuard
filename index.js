@@ -1140,6 +1140,7 @@ function check_message_exclusion(message) {
     if (get_data(message, 'exclude')) return false;
     if (!get_settings('include_user_messages') && message.is_user) return false;
     if (message.is_thoughts) return false;
+    if (/^\s*OOC[:：]/i.test(message.mes)) return false;
     if (!get_settings('include_system_messages') && message.is_system) return false;
     const tokenSize = count_tokens(message.mes);
     if (tokenSize < get_settings('message_length_threshold')) return false;
@@ -3059,6 +3060,7 @@ function validate_summary(summary, ctx, maxWords) {
     const forbiddenPatterns = [
         { pattern: /<think>/i, name: '<think> tag' },
         { pattern: /<\/think>/i, name: '</think> tag' },
+        { pattern: /<\|channel/i, name: '<|channel|> token' },
         { pattern: /^Hmm,?/i, name: 'Hmm reasoning' },
         { pattern: /^Let me\b/i, name: 'Let me...' },
         { pattern: /^I need to\b/i, name: 'I need to...' },
@@ -3263,6 +3265,34 @@ class SummaryQueue {
                     // No closing tag - content was truncated mid-thinking
                     debug_trunc('Summary contains unclosed <think> block, returning empty');
                     return '';
+                }
+            }
+
+            // Gemma 4 / harmony channel format: <|channel|>analysis...<|channel|>final...
+            // Extract content after the LAST channel marker (the final response)
+            const channelIdx = cleaned.toLowerCase().indexOf('<|channel');
+            if (channelIdx !== -1) {
+                const lower = cleaned.toLowerCase();
+                let cutIdx = lower.lastIndexOf('<|channel|>final');
+                if (cutIdx === -1) {
+                    cutIdx = lower.lastIndexOf('<|channel|>');
+                }
+                if (cutIdx !== -1) {
+                    let afterChannel = cleaned.substring(cutIdx);
+                    // Skip past the channel marker itself (and any role keyword like "final")
+                    afterChannel = afterChannel.replace(/^<\|channel\|>\w*/i, '');
+                    // Skip past <|message|> marker if present (harmony format)
+                    afterChannel = afterChannel.replace(/^<\|message\|>/i, '');
+                    // Strip trailing <|end|> / <|start|> markers
+                    afterChannel = afterChannel.replace(/<\|(end|start|return)\|>[\s\S]*$/i, '');
+                    afterChannel = afterChannel.trim();
+                    if (afterChannel.length > 0) {
+                        cleaned = afterChannel;
+                        debug_trunc(`Extracted ${afterChannel.length} chars after <|channel|> block`);
+                    } else {
+                        debug_trunc('Summary contains only <|channel|> block with no content after, returning empty');
+                        return '';
+                    }
                 }
             }
 
