@@ -73,6 +73,9 @@ RULES:
 • Never include reasoning, explanations, or meta-commentary
 • Never use tags like <think>, </think>, or similar
 • Stop immediately after the summary sentence
+• After the summary sentence, on a new line, emit a single JSON tag block:
+  {"npcs":[],"location":"","arc_phase":"","key_facts_changed":[]}
+  Use empty arrays/strings when nothing applies. Emit no other text.
 
 EXAMPLES:
 • "{{char}}: Accepted the apology but remained emotionally guarded."
@@ -3240,6 +3243,7 @@ class SummaryQueue {
      */
     clean_summary_output(text) {
         try {
+            this._lastTags = null;
             if (!text) return '';
 
             let cleaned = text.trim();
@@ -3311,6 +3315,26 @@ class SummaryQueue {
             // Strip common markup tokens that may appear in model outputs
             cleaned = cleaned.replace(/<\/?s>/gi, '');         // Remove <s> and </s>
             cleaned = cleaned.replace(/\[\/?INST\]/gi, '');  // Remove [INST] and [/INST]
+
+            // Extract structured tag block (last JSON object containing expected keys)
+            // Done BEFORE whitespace normalization so the JSON is still intact and
+            // BEFORE thinking-pattern truncation which could remove it accidentally.
+            const tagMatch = cleaned.match(/\{[^{}]*"(?:npcs|location|arc_phase|key_facts_changed)"[\s\S]*?\}/);
+            if (tagMatch) {
+                try {
+                    const parsed = JSON.parse(tagMatch[0]);
+                    this._lastTags = {
+                        npcs: Array.isArray(parsed.npcs) ? parsed.npcs.filter(x => typeof x === 'string' && x.trim()) : [],
+                        location: typeof parsed.location === 'string' ? parsed.location.trim() : '',
+                        arc_phase: typeof parsed.arc_phase === 'string' ? parsed.arc_phase.trim() : '',
+                        key_facts_changed: Array.isArray(parsed.key_facts_changed) ? parsed.key_facts_changed.filter(x => typeof x === 'string' && x.trim()) : [],
+                    };
+                    cleaned = (cleaned.substring(0, tagMatch.index) + cleaned.substring(tagMatch.index + tagMatch[0].length)).trim();
+                    debug_trunc(`Extracted tag block: npcs=${this._lastTags.npcs.length}, facts=${this._lastTags.key_facts_changed.length}`);
+                } catch (e) {
+                    debug_trunc(`Tag block parse failed: ${e.message}`);
+                }
+            }
 
             // Normalize excessive newlines and whitespace to single spaces
             cleaned = cleaned.replace(/\r\n|\r|\n/g, ' ');
@@ -3633,7 +3657,13 @@ class SummaryQueue {
                         set_data(message, 'memory', finalSummary);
                         set_data(message, 'needs_summary', false);
                         set_data(message, 'hash', getStringHash(message.mes));
-                        
+
+                        // Persist extracted tag block (B1) if the cleaner found one
+                        const extractedTags = this._lastTags;
+                        if (extractedTags && (extractedTags.npcs.length || extractedTags.location || extractedTags.arc_phase || extractedTags.key_facts_changed.length)) {
+                            set_data(message, 'tags', extractedTags);
+                        }
+
                         debug(`Summarized message ${index}: "${finalSummary}"`);
                     } else {
                         // All attempts failed - mark for manual review and log if debug enabled
@@ -4956,6 +4986,13 @@ function createChunkFromBuffer() {
     const messageIds = [];
     let oldestTimestamp = Infinity;
 
+    // B1: Aggregate per-message tags into chunk-level metadata
+    const npcSet = new Set();
+    const factList = [];
+    let aggLocation = '';
+    let aggArcPhase = '';
+    let latestTaggedTimestamp = -Infinity;
+
     // Build chunk text with speaker labels
     messageBuffer.forEach((msg) => {
         const speaker = msg.isUser ? getUserDisplayName() : (ctx.name2 || 'Character');
@@ -4965,6 +5002,20 @@ function createChunkFromBuffer() {
         // Track oldest message timestamp for proper temporal filtering
         if (msg.timestamp && msg.timestamp < oldestTimestamp) {
             oldestTimestamp = msg.timestamp;
+        }
+
+        // Look up persisted tags from chat by message index
+        const chatMsg = ctx.chat?.[msg.index];
+        const tags = chatMsg ? get_data(chatMsg, 'tags') : null;
+        if (tags) {
+            if (Array.isArray(tags.npcs)) tags.npcs.forEach(n => { if (n) npcSet.add(n); });
+            if (Array.isArray(tags.key_facts_changed)) tags.key_facts_changed.forEach(f => { if (f) factList.push(f); });
+            // For location/arc_phase, take the most recent non-empty value
+            if (msg.timestamp >= latestTaggedTimestamp) {
+                if (tags.location) aggLocation = tags.location;
+                if (tags.arc_phase) aggArcPhase = tags.arc_phase;
+                latestTaggedTimestamp = msg.timestamp;
+            }
         }
 
         const line = `${speaker}: ${msg.text}\n`;
@@ -4983,7 +5034,13 @@ function createChunkFromBuffer() {
         messageCount: messageBuffer.length,
         timestamp: oldestTimestamp,  // Use oldest message time, not indexing time
         chatId: ctx.chatId,
-        characterName: ctx.name2 || 'Unknown'
+        characterName: ctx.name2 || 'Unknown',
+        tags: {
+            npcs: Array.from(npcSet),
+            location: aggLocation,
+            arc_phase: aggArcPhase,
+            key_facts_changed: factList,
+        },
     };
 }
 
@@ -4993,16 +5050,84 @@ async function processMessageBuffer() {
     
     const chunk = createChunkFromBuffer();
     if (!chunk) return;
-    
+
     try {
+        // B3: if this chunk has key_facts_changed, find the most recent
+        // earlier chunk that shares any fact tokens and mark this chunk as
+        // superseding it. Old chunk is NOT deleted (keeps cache warm).
+        if (chunk.tags && Array.isArray(chunk.tags.key_facts_changed) && chunk.tags.key_facts_changed.length > 0) {
+            try {
+                chunk.supersedes = await find_superseded_chunk_id(chunk);
+                if (chunk.supersedes) {
+                    debug_qdrant(`New chunk supersedes ${chunk.supersedes}`);
+                }
+            } catch (e) {
+                debug_qdrant(`Supersession lookup failed: ${e.message}`);
+            }
+        }
+
         await saveChunkToQdrant(chunk);
         debug_qdrant(`Saved chunk with ${chunk.messageCount} messages`);
     } catch (e) {
         error('Failed to save chunk:', e);
     }
-    
+
     // Clear buffer after saving
     messageBuffer = [];
+}
+
+// B3: Look up the most recent earlier chunk in this chat whose
+// key_facts_changed shares any fact tokens with the given chunk.
+// Returns chunk UUID or empty string if no overlap found.
+async function find_superseded_chunk_id(newChunk) {
+    const url = get_settings('qdrant_url');
+    const collection = get_current_collection_name();
+    if (!url || !collection) return '';
+
+    const newFacts = newChunk.tags.key_facts_changed
+        .map(f => (typeof f === 'string' ? f.toLowerCase().trim() : ''))
+        .filter(Boolean);
+    if (newFacts.length === 0) return '';
+
+    try {
+        // Scroll the 10 most recent chunks in this chat
+        const scrollResponse = await fetch(`${url}/collections/${collection}/points/scroll`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filter: {
+                    must: [
+                        { key: 'chatId', match: { value: newChunk.chatId } },
+                        { key: 'isChunk', match: { value: true } }
+                    ]
+                },
+                limit: 10,
+                with_payload: true,
+                with_vector: false
+            })
+        });
+
+        if (!scrollResponse.ok) return '';
+        const data = await scrollResponse.json();
+        const points = data.result?.points || [];
+
+        // Sort by timestamp desc and find newest overlap
+        points.sort((a, b) => (b.payload?.timestamp || 0) - (a.payload?.timestamp || 0));
+
+        for (const point of points) {
+            const oldFactsStr = point.payload?.key_facts_changed || '';
+            if (!oldFactsStr) continue;
+            const oldFacts = oldFactsStr.split('|').map(f => f.toLowerCase().trim()).filter(Boolean);
+            const overlap = newFacts.some(nf => oldFacts.some(of => of.includes(nf) || nf.includes(of)));
+            if (overlap) {
+                return point.id;
+            }
+        }
+    } catch (e) {
+        debug_qdrant(`find_superseded_chunk_id error: ${e.message}`);
+    }
+
+    return '';
 }
 
 function buffer_message(index, text, isUser) {
@@ -5101,6 +5226,7 @@ async function saveChunkToQdrant(chunk) {
         await ensure_collection_exists();
         
         // Create point for Qdrant with simplified payload
+        const tags = chunk.tags || { npcs: [], location: '', arc_phase: '', key_facts_changed: [] };
         const point = {
             id: generate_point_id(),
             vector: embedding,
@@ -5112,7 +5238,14 @@ async function saveChunkToQdrant(chunk) {
                 messageIds: chunk.messageIds.join(','),
                 isChunk: true,
                 chatId: chunk.chatId,
-                characterName: chunk.characterName
+                characterName: chunk.characterName,
+                // B1: structured tag metadata (string-encoded for Qdrant keyword indexing)
+                npcs: tags.npcs.join(', '),
+                location: tags.location || '',
+                arc_phase: tags.arc_phase || '',
+                key_facts_changed: tags.key_facts_changed.join('|'),
+                // B3: chunk supersession reference (UUID of older chunk or empty)
+                supersedes: chunk.supersedes || ''
             }
         };
         
@@ -5206,6 +5339,12 @@ async function ensure_payload_indexes(collection) {
         { field: 'message_hash', schema: { type: 'keyword' } },  // For deduplication
         { field: 'is_user', schema: { type: 'bool' } },  // For filtering by message type
         { field: 'chunk_id', schema: { type: 'keyword' } },  // For chunk-based operations
+        // B1: scene-aware tag indexes
+        { field: 'npcs', schema: { type: 'keyword' } },
+        { field: 'location', schema: { type: 'keyword' } },
+        { field: 'arc_phase', schema: { type: 'keyword' } },
+        // B3: supersession reference (for future server-side filtering)
+        { field: 'supersedes', schema: { type: 'keyword' } },
     ];
     
     for (const index of indexes) {
@@ -5367,7 +5506,21 @@ async function search_memories(queryText, limit = null, scoreThreshold = null) {
         results = results.slice(0, limit);
 
         // Map results to memory format
-        const memories = results.map(r => map_search_result_to_memory(r));
+        let memories = results.map(r => map_search_result_to_memory(r));
+
+        // B3: supersession post-filter. If any returned chunk supersedes another
+        // chunk that is also in this result set, drop the older (superseded) one.
+        const supersededIds = new Set();
+        for (const m of memories) {
+            if (m.supersedes) supersededIds.add(m.supersedes);
+        }
+        if (supersededIds.size > 0) {
+            const before = memories.length;
+            memories = memories.filter(m => !supersededIds.has(m.id));
+            if (memories.length !== before) {
+                debug_qdrant(`Supersession filter dropped ${before - memories.length} stale chunk(s)`);
+            }
+        }
 
         // Track retrieval statistics
         track_retrieval_stats(memories, 0);
@@ -5492,6 +5645,7 @@ function map_search_result_to_memory(r) {
     }
     
     // Old chunked format (message_indexes plural, no chunk_id)
+    // This is also where active chunks land (payload uses camelCase: chatId, characterName, messageIds)
     return {
         id: r.id,
         score: r.score,
@@ -5499,12 +5653,20 @@ function map_search_result_to_memory(r) {
         temporalMultiplier: r.temporalMultiplier,
         text: payload.text,
         messageIndexes: payload.message_indexes,
+        messageIds: payload.messageIds,
         firstIndex: payload.first_index,
         lastIndex: payload.last_index,
         timestamp: payload.timestamp,
-        characterName: payload.character_name,
-        chatId: payload.chat_id,
-        isChunk: true
+        characterName: payload.character_name || payload.characterName,
+        chatId: payload.chat_id || payload.chatId,
+        isChunk: true,
+        // B1: scene-aware tag fields (default empty for legacy chunks)
+        npcs: payload.npcs || '',
+        location: payload.location || '',
+        arcPhase: payload.arc_phase || '',
+        keyFactsChanged: payload.key_facts_changed || '',
+        // B3: supersession reference
+        supersedes: payload.supersedes || ''
     };
 }
 
@@ -6413,36 +6575,69 @@ async function retrieve_relevant_memories() {
     // Build query from recent messages
     const retainRecent = get_settings('retain_recent_messages');
     const queryMessages = [];
-    
+    const entitySet = new Set();
+
     for (let i = Math.max(0, chat.length - retainRecent); i < chat.length; i++) {
         const message = chat[i];
         if (!message.is_system && message.mes) {
             queryMessages.push(message.mes);
         }
+        // B2: collect NPC entities from per-message tags in the recent window
+        const tags = chat[i] ? get_data(chat[i], 'tags') : null;
+        if (tags && Array.isArray(tags.npcs)) {
+            tags.npcs.forEach(n => { if (n && typeof n === 'string') entitySet.add(n.trim()); });
+        }
     }
-    
+
     if (queryMessages.length === 0) {
         return [];
     }
-    
+
     const queryText = queryMessages.join('\n\n');
-    
+
     try {
-        const memories = await search_memories(queryText);
-        
+        // B2: run an entity-targeted query per distinct NPC (cap at 4), plus the baseline.
+        // If no entities are present (legacy data, fresh chat), fall through to baseline only.
+        const entities = Array.from(entitySet).slice(0, 4);
+        let memories;
+        if (entities.length > 0) {
+            debug_qdrant(`Entity-based retrieval with ${entities.length} entities + baseline`);
+            const queries = [queryText, ...entities];
+            const resultsByQuery = await Promise.all(queries.map(q => search_memories(q).catch(e => {
+                debug_qdrant(`Sub-query failed (${q.substring(0, 30)}): ${e.message}`);
+                return [];
+            })));
+            // Merge: dedupe by id, take max score across queries
+            const byId = new Map();
+            for (const list of resultsByQuery) {
+                for (const m of list) {
+                    const existing = byId.get(m.id);
+                    if (!existing || m.score > existing.score) {
+                        byId.set(m.id, m);
+                    }
+                }
+            }
+            memories = Array.from(byId.values()).sort((a, b) => b.score - a.score);
+            // Apply memory_limit after merge
+            const memLimit = get_settings('memory_limit');
+            memories = memories.slice(0, memLimit);
+        } else {
+            memories = await search_memories(queryText);
+        }
+
         // Filter out memories that overlap with recent messages
         const filteredMemories = memories.filter(m => {
             // Exclude if any of the memory's messages are in recent context
             const newestMessageIndex = chat.length - 1;
             const oldestRecentIndex = newestMessageIndex - retainRecent;
-            
+
             // Memory's last message should be older than our recent window
             return m.lastIndex < oldestRecentIndex;
         });
-        
+
         debug_qdrant(`Retrieved ${filteredMemories.length} relevant memories (filtered from ${memories.length})`);
         return filteredMemories;
-        
+
     } catch (e) {
         error('Failed to retrieve memories:', e);
         return [];
