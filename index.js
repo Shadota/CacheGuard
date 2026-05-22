@@ -55,7 +55,7 @@ const default_settings = {
     auto_summarize: false,
     connection_profile: "",         // DEPRECATED: Connection profile dropdown removed — summarization uses independent summary_endpoint_url
     summary_endpoint_url: "",       // REQ-003: OpenAI-compatible summary endpoint URL (empty = use generateRaw)
-    summary_max_words: 50,          // Maximum words per summary
+    summary_max_words: 90,          // Maximum words per summary (allows up to 2 sentences)
     summary_endpoint_timeout: 15000,  // Timeout in ms (increased from 10s)
     summary_request_delay: 500,       // Delay between requests in ms
     summary_max_retries: 3,           // Max retry attempts on transient errors
@@ -66,7 +66,7 @@ NAMES: {{user}} is the user's character. {{char}} is the AI character.
 
 RULES:
 • Output ONLY the summary - nothing else
-• ONE sentence in past tense, max {{words}} words
+• Up to TWO sentences in past tense, max {{words}} words total
 • Start with speaker label: "{{char}}:", "{{user}}:", or "Narrator:"
 • Focus on: actions, decisions, emotions, key plot/worldbuilding details
 • Never add information not in the original message
@@ -2239,6 +2239,68 @@ function update_overview_tab() {
     // Update Predictions and Summarization Stats
     update_prediction_display();
     update_summary_stats_display();
+
+    // C2: Update RP-health panel
+    update_rp_health_display();
+}
+
+// C2: render RP-health stats into the Overview tab
+function update_rp_health_display() {
+    try {
+        const $panel = $('#ct_ov_rp_health');
+        if (!$panel.length) return;
+
+        const ctx = getContext();
+        const rules = ctx.characterId !== undefined ? RP_CARD_RULES[ctx.characterId] : null;
+
+        if (!rules) {
+            $('#ct_ov_rp_health_content').html('<div class="ct_memory_empty">No card rules extracted yet. Load a character with a configured summary endpoint.</div>');
+            return;
+        }
+
+        const health = compute_rp_health(ctx.chat || [], rules);
+        if (!health) {
+            $('#ct_ov_rp_health_content').html('<div class="ct_memory_empty">Not enough character messages to compute health.</div>');
+            return;
+        }
+
+        // Word count line with color tier
+        const [minWords, maxWords] = health.targetRange;
+        let wcColorClass = '';
+        let wcLabel = `${health.medianWordCount} words`;
+        if (maxWords > 0) {
+            const inRange = health.medianWordCount >= minWords && health.medianWordCount <= maxWords;
+            const slightlyOff = Math.abs(health.medianWordCount - (minWords + maxWords) / 2) <= (maxWords - minWords);
+            wcColorClass = inRange ? 'ct_text_green' : (slightlyOff ? 'ct_text_yellow' : 'ct_text_orange');
+            wcLabel = `${health.medianWordCount} (target ${minWords}-${maxWords})`;
+        }
+
+        // Format adherence rows
+        const formatRows = health.formatStats.map(f => {
+            if (f.pct === null) return `<div class="ct_advanced_item"><span class="ct_advanced_label">${escapeHtml(f.name)}</span><span class="ct_advanced_value ct_text_orange">invalid regex</span></div>`;
+            const cls = f.pct >= 80 ? 'ct_text_green' : (f.pct >= 50 ? 'ct_text_yellow' : 'ct_text_orange');
+            return `<div class="ct_advanced_item"><span class="ct_advanced_label">${escapeHtml(f.name)}</span><span class="ct_advanced_value ${cls}">${f.pct}%</span></div>`;
+        }).join('');
+
+        // Tic firing rows
+        const ticRows = health.ticStats.map(t =>
+            `<div class="ct_advanced_item"><span class="ct_advanced_label">${escapeHtml(t.description)}</span><span class="ct_advanced_value">${t.count}/${health.sampleSize}</span></div>`
+        ).join('');
+
+        const html = `
+            <div class="ct_advanced_grid">
+                <div class="ct_advanced_item">
+                    <span class="ct_advanced_label">Median word count (last ${health.sampleSize} msgs)</span>
+                    <span class="ct_advanced_value ${wcColorClass}">${wcLabel}</span>
+                </div>
+            </div>
+            ${formatRows ? `<div style="margin-top:6px;font-weight:bold;font-size:0.9em;">Format adherence</div><div class="ct_advanced_grid">${formatRows}</div>` : ''}
+            ${ticRows ? `<div style="margin-top:6px;font-weight:bold;font-size:0.9em;">Tic firing</div><div class="ct_advanced_grid">${ticRows}</div>` : ''}
+        `;
+        $('#ct_ov_rp_health_content').html(html);
+    } catch (e) {
+        debug(`update_rp_health_display error: ${e.message}`);
+    }
 }
 
 // ==================== SUMMARIZATION STATISTICS ====================
@@ -3081,11 +3143,11 @@ function validate_summary(summary, ctx, maxWords) {
         }
     }
     
-    // Rule 5: Should be roughly one sentence (no multiple sentences)
-    // Check for sentence-ending punctuation followed by space and uppercase
-    const multipleSentencePattern = /[.!?]\s+[A-Z]/;
-    if (multipleSentencePattern.test(trimmed)) {
-        return { valid: false, reason: 'Multiple sentences detected' };
+    // Rule 5: Allow up to 2 sentences (reject 3 or more)
+    // Count sentence boundaries: punctuation followed by space and uppercase
+    const sentenceBoundaries = (trimmed.match(/[.!?]\s+[A-Z]/g) || []).length;
+    if (sentenceBoundaries >= 2) {
+        return { valid: false, reason: `Too many sentences: ${sentenceBoundaries + 1} (max 2)` };
     }
     
     return { valid: true, reason: null };
@@ -3378,13 +3440,12 @@ class SummaryQueue {
             // Remove any remaining word count annotations like "(45 words)"
             cleaned = cleaned.replace(/\(\s*\d+\s*words?\s*\)/gi, '').trim();
 
-            // If multiple sentences remain, pick the first sentence-like fragment
-            const sentenceEnd = /([.!?])\s+/;
+            // Keep up to 2 sentences (C3: density tuning)
             let firstChunk = cleaned;
             if (cleaned.length > 0) {
-                const parts = cleaned.split(sentenceEnd);
-                if (parts && parts.length > 0) {
-                    firstChunk = parts[0];
+                const twoSent = cleaned.match(/^.+?[.!?](?:\s+.+?[.!?])?/);
+                if (twoSent) {
+                    firstChunk = twoSent[0];
                 }
             }
 
@@ -3709,6 +3770,150 @@ class SummaryQueue {
 
 const summaryQueue = new SummaryQueue();
 
+// ==================== C1: CARD-SPECIFIC RP RULES ====================
+
+// In-memory cache of extracted RP rules, keyed by characterId.
+// Shape: { tics: [{pattern, description}], format_blocks: [{name, regex}], target_word_range: [min, max] }
+const RP_CARD_RULES = {};
+
+// C2: Compute RP-health metrics from the last N character messages
+function compute_rp_health(chat, rules) {
+    if (!chat || chat.length === 0) return null;
+    if (!rules || (!rules.tics?.length && !rules.format_blocks?.length && !(rules.target_word_range?.[1]))) return null;
+
+    // Last 30 character messages (non-user, non-system)
+    const charMessages = [];
+    for (let i = chat.length - 1; i >= 0 && charMessages.length < 30; i--) {
+        const m = chat[i];
+        if (m && !m.is_user && !m.is_system && m.mes) {
+            charMessages.push(m.mes);
+        }
+    }
+    if (charMessages.length === 0) return null;
+
+    // Word counts
+    const wordCounts = charMessages.map(m => m.split(/\s+/).filter(Boolean).length).sort((a, b) => a - b);
+    const median = wordCounts[Math.floor(wordCounts.length / 2)];
+
+    // Format adherence per block
+    const formatStats = (rules.format_blocks || []).map(block => {
+        let regex;
+        try { regex = new RegExp(block.regex); } catch (e) { return { name: block.name, pct: null }; }
+        const matchCount = charMessages.filter(m => regex.test(m)).length;
+        return { name: block.name || block.regex.substring(0, 20), pct: Math.round((matchCount / charMessages.length) * 100) };
+    });
+
+    // Tic firing counts
+    const ticStats = (rules.tics || []).map(tic => {
+        let regex;
+        try { regex = new RegExp(tic.pattern, 'i'); } catch (e) { return { description: tic.description || tic.pattern, count: 0 }; }
+        const count = charMessages.reduce((sum, m) => sum + (m.match(regex) ? 1 : 0), 0);
+        return { description: tic.description || tic.pattern.substring(0, 30), count };
+    });
+
+    return {
+        sampleSize: charMessages.length,
+        medianWordCount: median,
+        targetRange: rules.target_word_range || [0, 0],
+        formatStats,
+        ticStats,
+    };
+}
+
+async function extract_card_rules_if_needed() {
+    try {
+        const ctx = getContext();
+        const characterId = ctx.characterId;
+        if (characterId === undefined || characterId === null) return;
+
+        // Already loaded into memory for this character?
+        if (RP_CARD_RULES[characterId]) return;
+
+        // Check persisted cache in chat_metadata
+        if (!chat_metadata[MODULE_NAME]) chat_metadata[MODULE_NAME] = {};
+        const persisted = chat_metadata[MODULE_NAME].card_rules?.[characterId];
+        if (persisted) {
+            RP_CARD_RULES[characterId] = persisted;
+            debug(`Loaded card rules from chat_metadata for character ${characterId}`);
+            return;
+        }
+
+        // Need to extract: requires summary endpoint
+        if (!get_settings('summary_endpoint_url')) {
+            debug('No summary endpoint configured, skipping card rule extraction');
+            return;
+        }
+
+        const character = ctx.characters?.[characterId];
+        if (!character) return;
+
+        const cardText = [
+            character.description || '',
+            character.first_mes || '',
+            character.scenario || '',
+            character.personality || '',
+        ].filter(Boolean).join('\n\n');
+
+        if (!cardText || cardText.length < 50) {
+            debug('Card text too short, skipping rule extraction');
+            return;
+        }
+
+        const prompt = `Analyze this character card and extract RP-health rules. Emit ONLY a JSON object, no other text:
+
+{"tics":[{"pattern":"<verbal tic or catchphrase>","description":"<when used>"}],"format_blocks":[{"name":"<block name>","regex":"<JS regex pattern>"}],"target_word_range":[<min>,<max>]}
+
+Tics are recurring phrases the character uses. Format blocks are expected structural elements (e.g., bold names, italic actions). Target word range is the typical response length for this character.
+
+CHARACTER CARD:
+${cardText.substring(0, 4000)}
+
+JSON:`;
+
+        debug(`Extracting card rules for character ${characterId}...`);
+        let result;
+        try {
+            result = await call_summary_endpoint(prompt, { maxTokensOverride: 800 });
+        } catch (e) {
+            debug(`Card rule extraction call failed: ${e.message}`);
+            return;
+        }
+        if (!result) return;
+
+        const raw = typeof result === 'string' ? result : (result?.toString?.() || '');
+        // Find the JSON object in the response
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            debug('Card rule extraction: no JSON found in response');
+            return;
+        }
+
+        let parsed;
+        try {
+            parsed = JSON.parse(jsonMatch[0]);
+        } catch (e) {
+            debug(`Card rule extraction: JSON parse failed: ${e.message}`);
+            return;
+        }
+
+        const rules = {
+            tics: Array.isArray(parsed.tics) ? parsed.tics.filter(t => t && typeof t.pattern === 'string') : [],
+            format_blocks: Array.isArray(parsed.format_blocks) ? parsed.format_blocks.filter(b => b && typeof b.regex === 'string') : [],
+            target_word_range: Array.isArray(parsed.target_word_range) && parsed.target_word_range.length === 2
+                ? [Number(parsed.target_word_range[0]) || 0, Number(parsed.target_word_range[1]) || 0]
+                : [0, 0],
+        };
+
+        RP_CARD_RULES[characterId] = rules;
+        if (!chat_metadata[MODULE_NAME].card_rules) chat_metadata[MODULE_NAME].card_rules = {};
+        chat_metadata[MODULE_NAME].card_rules[characterId] = rules;
+        saveMetadataDebounced();
+        debug(`Extracted card rules: ${rules.tics.length} tics, ${rules.format_blocks.length} format blocks, range [${rules.target_word_range[0]}-${rules.target_word_range[1]}]`);
+    } catch (e) {
+        debug(`extract_card_rules_if_needed error: ${e.message}`);
+    }
+}
+
 // Auto-summarization
 async function auto_summarize_chat() {
     const ctx = getContext();
@@ -3775,7 +3980,10 @@ function register_event_listeners() {
         snapshot_chat_state();
         
         refresh_memory();
-        
+
+        // C1: extract card-specific RP rules (cached per character)
+        extract_card_rules_if_needed();
+
         // Update UI with loaded state immediately (don't wait for generation)
         update_overview_tab();
         update_calibration_ui();
@@ -4174,6 +4382,19 @@ function initialize_ui_listeners() {
         const $content = $('#ct_ov_memory_list');
         const isExpanded = $content.is(':visible');
 
+        if (isExpanded) {
+            $content.slideUp(200);
+            $(this).removeClass('expanded');
+        } else {
+            $content.slideDown(200);
+            $(this).addClass('expanded');
+        }
+    });
+
+    // C2: RP Health panel toggle
+    $('#ct_ov_rp_health_toggle').on('click', function() {
+        const $content = $('#ct_ov_rp_health_content');
+        const isExpanded = $content.is(':visible');
         if (isExpanded) {
             $content.slideUp(200);
             $(this).removeClass('expanded');
